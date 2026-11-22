@@ -29,7 +29,6 @@ const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
 const DATA_FILE = path.join(__dirname, "data.json");
 
-
 let db = {
   courses: {
     bp: {
@@ -50,7 +49,6 @@ let db = {
     }
   }
 };
-
 
 function loadDB() {
   try {
