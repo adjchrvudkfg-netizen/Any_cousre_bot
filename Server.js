@@ -29,14 +29,28 @@ const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
 const DATA_FILE = path.join(__dirname, "data.json");
 
+
 let db = {
   courses: {
-    bp: { name: "B.Pharm", semesters: {} },
-    dp: { name: "D.Pharm", semesters: {} },
-    cet: { name: "Rajasthan CET", semesters: {} },
-    class12: { name: "12th Class", semesters: {} }
+    bp: {
+      name: "B.Pharm",
+      semesters: {}
+    },
+    dp: {
+      name: "D.Pharm",
+      semesters: {}
+    },
+    cet: {
+      name: "Rajasthan CET",
+      semesters: {}
+    },
+    class12: {
+      name: "12th Class",
+      semesters: {}
+    }
   }
 };
+
 
 function loadDB() {
   try {
