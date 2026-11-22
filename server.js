@@ -1,38 +1,38 @@
 // ============================================
-// TATSAR STUDY BOT
-// INLINE BUTTON SYSTEM
+// TATSAR STUDY BOT - SERVER.JS
+// PART 1/3
 // ============================================
 
 const TelegramBot = require("node-telegram-bot-api");
 const express = require("express");
-const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
+const axios = require("axios");
 const pdfParse = require("pdf-parse");
 require("dotenv").config();
 
 const app = express();
 app.use(express.json());
 
-const PORT = process.env.PORT || 3000;
 const TOKEN = process.env.BOT_TOKEN;
-const ADMIN_IDS = (process.env.ADMIN_IDS || "")
+const ADMIN_IDS = (process.env.ADMIN_IDS || "8833629094")
   .split(",")
-  .map(id => id.trim())
-  .filter(Boolean);
+  .map(id => id.trim());
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const PORT = process.env.PORT || 3000;
 
 if (!TOKEN) {
-  throw new Error("BOT_TOKEN Render Environment Variables mein set karein.");
+  console.error("ERROR: BOT_TOKEN environment variable missing.");
+  process.exit(1);
 }
 
 const bot = new TelegramBot(TOKEN, {
   polling: true
 });
 
-const DATA_FILE = path.join(__dirname, "data.json");
+const DB_FILE = path.join(__dirname, "data.json");
 
 const DEFAULT_DB = {
   courses: {
@@ -57,30 +57,26 @@ const DEFAULT_DB = {
 
 function loadDB() {
   try {
-    if (!fs.existsSync(DATA_FILE)) {
+    if (!fs.existsSync(DB_FILE)) {
       fs.writeFileSync(
-        DATA_FILE,
+        DB_FILE,
         JSON.stringify(DEFAULT_DB, null, 2)
       );
       return JSON.parse(JSON.stringify(DEFAULT_DB));
     }
 
-    const saved = JSON.parse(
-      fs.readFileSync(DATA_FILE, "utf8")
+    const data = JSON.parse(
+      fs.readFileSync(DB_FILE, "utf8")
     );
 
-    saved.courses = saved.courses || {};
-
-    for (const code of Object.keys(DEFAULT_DB.courses)) {
-      if (!saved.courses[code]) {
-        saved.courses[code] =
-          JSON.parse(JSON.stringify(DEFAULT_DB.courses[code]));
-      }
+    if (!data.courses) {
+      data.courses = DEFAULT_DB.courses;
     }
 
-    return saved;
+    return data;
+
   } catch (error) {
-    console.error("DATABASE ERROR:", error.message);
+    console.error("DATABASE LOAD ERROR:", error.message);
     return JSON.parse(JSON.stringify(DEFAULT_DB));
   }
 }
@@ -88,11 +84,37 @@ function loadDB() {
 let db = loadDB();
 
 function saveDB() {
-  fs.writeFileSync(
-    DATA_FILE,
-    JSON.stringify(db, null, 2),
-    "utf8"
-  );
+  try {
+    fs.writeFileSync(
+      DB_FILE,
+      JSON.stringify(db, null, 2)
+    );
+  } catch (error) {
+    console.error("DATABASE SAVE ERROR:", error.message);
+  }
+}
+
+// ============================================
+// USER SESSIONS
+// ============================================
+
+const sessions = {};
+
+function getSession(userId) {
+  if (!sessions[userId]) {
+    sessions[userId] = {
+      course: null,
+      semester: null,
+      unit: null,
+      chapter: null,
+      feature: null,
+      awaitingQuestion: false,
+      lastBotMessageId: null,
+      step: "home"
+    };
+  }
+
+  return sessions[userId];
 }
 
 function isAdmin(userId) {
@@ -100,268 +122,233 @@ function isAdmin(userId) {
 }
 
 // ============================================
-// USER SESSIONS
+// BUTTON LABELS
 // ============================================
 
-const sessions = new Map();
-
-function getSession(userId) {
-  const id = String(userId);
-
-  if (!sessions.has(id)) {
-    sessions.set(id, {
-      feature: null,
-      course: null,
-      semester: null,
-      unit: null,
-      chapter: null,
-      step: "home",
-      awaitingQuestion: false,
-      pickMap: {}
-    });
-  }
-
-  return sessions.get(id);
-}
-
-// ============================================
-// COURSE DATA FUNCTIONS
-// ============================================
-
-function getSemesters(course) {
-  return db.courses[course]?.semesters || {};
-}
-
-function getUnits(course, semester) {
-  return getSemesters(course)[semester]?.units || {};
-}
-
-function getChapters(course, semester, unit) {
-  return getUnits(course, semester)[unit]?.chapters || {};
-}
-
-const COURSES = {
-  "bp": "B.Pharm",
-  "dp": "D.Pharm",
-  "cet": "Rajasthan CET",
-  "class12": "12th Class"
-};
-
-const FEATURE_NAMES = {
+const BUTTONS = {
   syllabus: "🟩 Syllabus",
   notes: "🟦 Handwritten Notes",
   pyq: "🟩 PYQ Questions",
   mcq: "🟩 MCQ Questions",
   mock: "🟩 Mock Test",
-  ai: "🟩 AI Assistant"
+  ai: "🟩 AI Assistant",
+
+  bp: "🟩 B.Pharm",
+  dp: "🟩 D.Pharm",
+  cet: "🟩 Rajasthan CET",
+  class12: "🟩 12th Class",
+
+  back: "⬅️ Back",
+  home: "🏠 Main Menu"
+};
+
+const FEATURE_NAMES = {
+  syllabus: "Syllabus",
+  notes: "Handwritten Notes",
+  pyq: "PYQ Questions",
+  mcq: "MCQ Questions",
+  mock: "Mock Test",
+  ai: "AI Assistant"
+};
+
+const COURSE_NAMES = {
+  bp: "B.Pharm",
+  dp: "D.Pharm",
+  cet: "Rajasthan CET",
+  class12: "12th Class"
 };
 
 // ============================================
-// SEND LONG MESSAGES
+// PAGE SYSTEM
+// Deletes the previous bot page before sending
+// a new one.
 // ============================================
 
-async function sendLongMessage(chatId, message) {
-  const text = String(message || "");
+async function sendPage(chatId, userId, text, keyboard, options = {}) {
+  const session = getSession(userId);
 
-  if (!text.trim()) {
-    return bot.sendMessage(chatId, "Content available nahi hai.");
-  }
-
-  const chunks = text.match(/[\s\S]{1,3900}/g) || [];
-
-  for (const chunk of chunks) {
-    await bot.sendMessage(chatId, chunk);
-  }
-}
-
-// ============================================
-// INLINE KEYBOARD HELPERS
-// ============================================
-
-function makeRows(items, columns = 2) {
-  const rows = [];
-
-  for (let i = 0; i < items.length; i += columns) {
-    rows.push(items.slice(i, i + columns));
-  }
-
-  return rows;
-}
-
-async function sendInlineMenu(chatId, text, keyboard) {
-  return bot.sendMessage(chatId, text, {
-    reply_markup: {
-      inline_keyboard: keyboard
+  if (session.lastBotMessageId) {
+    try {
+      await bot.deleteMessage(
+        chatId,
+        session.lastBotMessageId
+      );
+    } catch (error) {
+      // Message may already be deleted or too old.
     }
-  });
+
+    session.lastBotMessageId = null;
+  }
+
+  const message = await bot.sendMessage(
+    chatId,
+    text,
+    {
+      parse_mode: "HTML",
+      reply_markup: {
+        keyboard: keyboard,
+        resize_keyboard: true,
+        is_persistent: true
+      },
+      ...options
+    }
+  );
+
+  session.lastBotMessageId = message.message_id;
+
+  return message;
 }
 
 // ============================================
-// MAIN MENU
+// MAIN MENU KEYBOARD
 // ============================================
 
-function getMainKeyboard() {
+function mainKeyboard() {
   return [
-    [
-      {
-        text: "🟩 Syllabus",
-        callback_data: "f:syllabus"
-      },
-      {
-        text: "🟦 Handwritten Notes",
-        callback_data: "f:notes"
-      }
-    ],
-    [
-      {
-        text: "🟩 PYQ Questions",
-        callback_data: "f:pyq"
-      },
-      {
-        text: "🟩 MCQ Questions",
-        callback_data: "f:mcq"
-      }
-    ],
-    [
-      {
-        text: "🟩 Mock Test",
-        callback_data: "f:mock"
-      },
-      {
-        text: "🟩 AI Assistant",
-        callback_data: "f:ai"
-      }
-    ]
+    [BUTTONS.syllabus, BUTTONS.notes],
+    [BUTTONS.pyq, BUTTONS.mcq],
+    [BUTTONS.mock, BUTTONS.ai]
   ];
 }
 
 async function sendHome(chatId, userId) {
   const session = getSession(userId);
 
-  session.feature = null;
   session.course = null;
   session.semester = null;
   session.unit = null;
   session.chapter = null;
-  session.step = "home";
+  session.feature = null;
   session.awaitingQuestion = false;
+  session.step = "home";
 
-  return sendInlineMenu(
-    chatId,
-    "🌸 WELCOME TO TATSAR STUDY BOT 🌸\n\n" +
+  const text =
+    "🌸 <b>WELCOME TO TATSAR STUDY BOT</b> 🌸\n\n" +
     "📚 Your Complete Study Assistant\n\n" +
     "📝 Notes and study material\n" +
     "📖 PYQ and MCQ questions\n" +
     "🧪 Mock tests\n" +
     "🤖 AI Study Assistant\n\n" +
-    "👇 Select an option below:",
-    getMainKeyboard()
-  );
-}
+    "👇 Select an option below:";
 
-// ============================================
-// PICK MENU WITH INLINE BUTTONS
-// ============================================
-
-async function sendPickMenu(
-  chatId,
-  userId,
-  type,
-  title,
-  items,
-  backAction = "back"
-) {
-  const session = getSession(userId);
-
-  session.pickMap[type] = items;
-  session.step = type;
-
-  if (!items.length) {
-    return sendInlineMenu(
-      chatId,
-      "❌ Abhi is section ka content available nahi hai.",
-      [[
-        {
-          text: "🏠 Main Menu",
-          callback_data: "nav:home"
-        }
-      ]]
-    );
-  }
-
-  const buttons = items.map((item, index) => ({
-    text: "🟩 " + item,
-    callback_data: `p:${type}:${index}`
-  }));
-
-  const keyboard = makeRows(buttons, 2);
-
-  keyboard.push([
-    {
-      text: "⬅️ Back",
-      callback_data: "nav:" + backAction
-    },
-    {
-      text: "🏠 Main Menu",
-      callback_data: "nav:home"
-    }
-  ]);
-
-  return sendInlineMenu(
+  return sendPage(
     chatId,
-    title,
-    keyboard
+    userId,
+    text,
+    mainKeyboard()
   );
 }
+
 // ============================================
 // COURSE SELECTION
 // ============================================
 
 async function sendCourses(chatId, userId) {
   const session = getSession(userId);
-
   session.step = "courses";
 
+  const text =
+    "📚 <b>Apna course select karein:</b>";
+
   const keyboard = [
-    [
-      { text: "🟩 B.Pharm", callback_data: "c:bp" },
-      { text: "🟩 D.Pharm", callback_data: "c:dp" }
-    ],
-    [
-      { text: "🟩 Rajasthan CET", callback_data: "c:cet" },
-      { text: "🟩 12th Class", callback_data: "c:class12" }
-    ],
-    [
-      { text: "🏠 Main Menu", callback_data: "nav:home" }
-    ]
+    [BUTTONS.bp, BUTTONS.dp],
+    [BUTTONS.cet, BUTTONS.class12],
+    [BUTTONS.home]
   ];
 
-  return sendInlineMenu(
+  return sendPage(
     chatId,
-    "📚 Apna course select karein:",
+    userId,
+    text,
     keyboard
   );
 }
 
 // ============================================
-// SEMESTER / LEVEL SELECTION
+// GET COURSE DATA
+// ============================================
+
+function getCourse(courseCode) {
+  return db.courses[courseCode] || null;
+}
+
+function getSemesters(courseCode) {
+  const course = getCourse(courseCode);
+
+  if (!course || !course.semesters) {
+    return [];
+  }
+
+  return Object.keys(course.semesters);
+}
+
+function getUnits(courseCode, semester) {
+  const course = getCourse(courseCode);
+
+  if (!course || !course.semesters[semester]) {
+    return [];
+  }
+
+  return Object.keys(
+    course.semesters[semester].units || {}
+  );
+}
+
+function getChapters(courseCode, semester, unit) {
+  const course = getCourse(courseCode);
+
+  if (
+    !course ||
+    !course.semesters[semester] ||
+    !course.semesters[semester].units[unit]
+  ) {
+    return {};
+  }
+
+  return course.semesters[semester].units[unit].chapters || {};
+}
+
+// ============================================
+// SEMESTER SELECTION
 // ============================================
 
 async function sendSemesters(chatId, userId) {
   const session = getSession(userId);
+  const course = getCourse(session.course);
 
-  const semesters = Object.keys(
-    getSemesters(session.course)
-  );
+  if (!course) {
+    return sendCourses(chatId, userId);
+  }
 
-  return sendPickMenu(
+  const semesters = getSemesters(session.course);
+
+  session.step = "semesters";
+
+  if (!semesters.length) {
+    return sendPage(
+      chatId,
+      userId,
+      "❌ <b>Abhi is course ka content available nahi hai.</b>\n\n" +
+      "Admin se content upload karwayein.",
+      [[BUTTONS.home]]
+    );
+  }
+
+  const keyboard = [];
+
+  for (let i = 0; i < semesters.length; i += 2) {
+    const row = semesters.slice(i, i + 2);
+    keyboard.push(row);
+  }
+
+  keyboard.push([BUTTONS.back, BUTTONS.home]);
+
+  return sendPage(
     chatId,
     userId,
-    "semester",
-    "📚 " + COURSES[session.course] +
-    "\n\nSemester / Level select karein:",
-    semesters,
-    "courses"
+    "📚 <b>" + course.name + "</b>\n\n" +
+    "Apna semester / year select karein:",
+    keyboard
   );
 }
 
@@ -372,18 +359,36 @@ async function sendSemesters(chatId, userId) {
 async function sendUnits(chatId, userId) {
   const session = getSession(userId);
 
-  const units = Object.keys(
-    getUnits(session.course, session.semester)
+  const units = getUnits(
+    session.course,
+    session.semester
   );
 
-  return sendPickMenu(
+  session.step = "units";
+
+  if (!units.length) {
+    return sendPage(
+      chatId,
+      userId,
+      "❌ Is semester mein abhi koi unit available nahi hai.",
+      [[BUTTONS.back, BUTTONS.home]]
+    );
+  }
+
+  const keyboard = [];
+
+  for (let i = 0; i < units.length; i += 2) {
+    keyboard.push(units.slice(i, i + 2));
+  }
+
+  keyboard.push([BUTTONS.back, BUTTONS.home]);
+
+  return sendPage(
     chatId,
     userId,
-    "unit",
-    "📖 " + session.semester +
-    "\n\nUnit select karein:",
-    units,
-    "semesters"
+    "📖 <b>" + session.semester + "</b>\n\n" +
+    "Apni unit select karein:",
+    keyboard
   );
 }
 
@@ -394,67 +399,94 @@ async function sendUnits(chatId, userId) {
 async function sendChapters(chatId, userId) {
   const session = getSession(userId);
 
-  const chapters = Object.keys(
-    getChapters(
-      session.course,
-      session.semester,
-      session.unit
-    )
+  const chapters = getChapters(
+    session.course,
+    session.semester,
+    session.unit
   );
 
-  return sendPickMenu(
+  const chapterNames = Object.keys(chapters);
+
+  session.step = "chapters";
+
+  if (!chapterNames.length) {
+    return sendPage(
+      chatId,
+      userId,
+      "❌ Is unit mein abhi koi chapter available nahi hai.",
+      [[BUTTONS.back, BUTTONS.home]]
+    );
+  }
+
+  const keyboard = [];
+
+  for (let i = 0; i < chapterNames.length; i += 2) {
+    keyboard.push(chapterNames.slice(i, i + 2));
+  }
+
+  keyboard.push([BUTTONS.back, BUTTONS.home]);
+
+  return sendPage(
     chatId,
     userId,
-    "chapter",
-    "📚 " + session.unit +
-    "\n\nChapter select karein:",
-    chapters,
-    "units"
-  );
-}
-
-// ============================================
-// STUDY OPTIONS AFTER CHAPTER
-// ============================================
-
-async function sendStudyOptions(chatId, userId) {
-  const session = getSession(userId);
-
-  session.step = "options";
-
-  const keyboard = [
-    [
-      { text: "🟩 Syllabus", callback_data: "f:syllabus" },
-      { text: "🟦 Handwritten Notes", callback_data: "f:notes" }
-    ],
-    [
-      { text: "🟩 PYQ Questions", callback_data: "f:pyq" },
-      { text: "🟩 MCQ Questions", callback_data: "f:mcq" }
-    ],
-    [
-      { text: "🟩 Mock Test", callback_data: "f:mock" },
-      { text: "🟩 AI Assistant", callback_data: "f:ai" }
-    ],
-    [
-      { text: "⬅️ Back", callback_data: "nav:chapters" },
-      { text: "🏠 Main Menu", callback_data: "nav:home" }
-    ]
-  ];
-
-  return sendInlineMenu(
-    chatId,
-    "✅ Chapter selected!\n\n" +
-    "📘 " + session.chapter +
-    "\n\nAb study option select karein:",
+    "📝 <b>" + session.unit + "</b>\n\n" +
+    "Apna chapter select karein:",
     keyboard
   );
 }
 
 // ============================================
-// OPENAI CONTENT GENERATION
+// STUDY OPTIONS
 // ============================================
 
-async function generateAI(prompt, pdfText) {
+async function sendStudyOptions(chatId, userId) {
+  const session = getSession(userId);
+
+  session.step = "study-options";
+
+  const keyboard = [
+    [BUTTONS.syllabus, BUTTONS.notes],
+    [BUTTONS.pyq, BUTTONS.mcq],
+    [BUTTONS.mock, BUTTONS.ai],
+    [BUTTONS.back, BUTTONS.home]
+  ];
+
+  const text =
+    "📚 <b>" + session.chapter + "</b>\n\n" +
+    "👇 Ab kya padhna chahte hain?";
+
+  return sendPage(
+    chatId,
+    userId,
+    text,
+    keyboard
+  );
+}
+// ============================================
+// TATSAR STUDY BOT
+// PART 2/3
+// ============================================
+
+// ============================================
+// LONG MESSAGE SENDER
+// ============================================
+
+async function sendLongMessage(chatId, text) {
+  const maxLength = 3800;
+
+  for (let i = 0; i < text.length; i += maxLength) {
+    await bot.sendMessage(
+      chatId,
+      text.substring(i, i + maxLength)
+    );
+  }
+}
+
+// ============================================
+// OPENAI AI GENERATOR
+// ============================================
+
+async function generateAI(question, pdfText) {
   if (!OPENAI_API_KEY) {
     throw new Error("OPENAI_API_KEY missing");
   }
@@ -468,23 +500,23 @@ async function generateAI(prompt, pdfText) {
           role: "system",
           content:
             "You are TATSAR Study Assistant. " +
-            "Explain everything in easy Hinglish. " +
-            "Use clear headings, definitions, examples, " +
-            "important points and exam-oriented explanations. " +
-            "Use the supplied PDF as your main source. " +
-            "Do not invent claims that questions are verified actual PYQs. " +
-            "If the PDF does not contain an answer, clearly say so."
+            "Answer using the supplied study material. " +
+            "Explain in simple Hinglish. " +
+            "Use headings, bullet points and examples. " +
+            "If the supplied material does not contain the answer, " +
+            "clearly say that the PDF does not provide enough information. " +
+            "Do not invent PDF facts."
         },
         {
           role: "user",
           content:
-            "PDF SOURCE CONTENT:\n" +
+            "STUDY MATERIAL:\n" +
             pdfText.slice(0, 45000) +
-            "\n\nSTUDENT TASK:\n" +
-            prompt
+            "\n\nQUESTION:\n" +
+            question
         }
       ],
-      temperature: 0.5
+      temperature: 0.4
     },
     {
       headers: {
@@ -495,14 +527,17 @@ async function generateAI(prompt, pdfText) {
     }
   );
 
-  return response.data.choices[0].message.content;
+  return (
+    response.data.choices[0].message.content ||
+    "Answer generate nahi ho paya."
+  );
 }
 
 // ============================================
-// GENERATE STUDY CONTENT
+// GET SELECTED CHAPTER TEXT
 // ============================================
 
-async function generateForFeature(chatId, userId, feature) {
+function getSelectedChapter(userId) {
   const session = getSession(userId);
 
   if (
@@ -511,104 +546,171 @@ async function generateForFeature(chatId, userId, feature) {
     !session.unit ||
     !session.chapter
   ) {
-    return bot.sendMessage(
-      chatId,
-      "Pehle course aur chapter select karein."
-    );
+    return null;
   }
 
-  const chapterData = getChapters(
+  const chapters = getChapters(
     session.course,
     session.semester,
     session.unit
-  )[session.chapter];
+  );
+
+  return chapters[session.chapter] || null;
+}
+
+// ============================================
+// FEATURE PROMPTS
+// ============================================
+
+const FEATURE_PROMPTS = {
+  syllabus:
+    "Is study material se detailed syllabus banao. " +
+    "Topics aur subtopics ko proper order mein likho.",
+
+  notes:
+    "Is study material se detailed study notes banao. " +
+    "Definitions, explanations, examples aur important points do. " +
+    "Notes simple Hinglish mein banao.",
+
+  pyq:
+    "Is study material se exam-oriented previous-year-style questions banao. " +
+    "Questions ke saath detailed answers bhi do. " +
+    "Inhe actual previous-year questions claim mat karna.",
+
+  mcq:
+    "Is study material se 20 MCQ questions banao. " +
+    "Har question ke 4 options aur correct answer do. " +
+    "Answer ki short explanation bhi do.",
+
+  mock:
+    "Is study material par based 20-question mock test banao. " +
+    "Pehle questions aur options do, phir answer key alag do.",
+
+  ai:
+    "Is study material ka short overview do aur student ko " +
+    "is chapter ke baare mein questions poochhne ke liye bolo."
+};
+
+// ============================================
+// GENERATE FEATURE CONTENT
+// ============================================
+
+async function generateForFeature(chatId, userId, feature) {
+  const session = getSession(userId);
+  const chapterData = getSelectedChapter(userId);
 
   if (!chapterData || !chapterData.text) {
+    session.awaitingQuestion = false;
+
     return bot.sendMessage(
       chatId,
-      "❌ Is chapter ki PDF abhi admin ne upload nahi ki hai."
+      "❌ Is chapter ka PDF content abhi available nahi hai."
     );
   }
 
-  const prompts = {
-    syllabus:
-      "Is chapter ka detailed topic-wise syllabus aur outline banao.",
+  if (!FEATURE_NAMES[feature]) {
+    return;
+  }
 
-    notes:
-      "Is chapter ke detailed exam-oriented notes Hinglish mein banao. " +
-      "Definitions, headings, examples, diagrams ko text mein explain karo " +
-      "aur important points include karo.",
+  session.feature = feature;
 
-    pyq:
-      "Is chapter ke 20 previous-year-pattern questions answers ke saath banao. " +
-      "Inhe actual verified PYQ mat kehna.",
+  if (feature === "ai") {
+    session.awaitingQuestion = true;
 
-    mcq:
-      "Is chapter ke 25 MCQ banao. Har question ke 4 options aur correct answer do.",
-
-    mock:
-      "Is chapter ka 20-question mock test banao. " +
-      "End mein answer key aur short explanations do.",
-
-    ai:
-      "Is chapter ke important concepts ko easy Hinglish mein samjhao. " +
-      "Student ko follow-up questions poochhne ke liye invite karo."
-  };
-
-  try {
     await bot.sendMessage(
       chatId,
-      "⏳ AI tumhara study material prepare kar raha hai..."
+      "🤖 <b>AI Study Assistant</b>\n\n" +
+      "Is chapter se related apna question bhejein.\n\n" +
+      "Main uploaded study material ke basis par answer dunga.",
+      {
+        parse_mode: "HTML"
+      }
     );
 
+    try {
+      const overview = await generateAI(
+        FEATURE_PROMPTS.ai,
+        chapterData.text
+      );
+
+      await sendLongMessage(chatId, overview);
+
+    } catch (error) {
+      console.error("AI OVERVIEW ERROR:", error.message);
+
+      await bot.sendMessage(
+        chatId,
+        "AI overview generate nahi ho paya. Aap apna question bhej sakte hain."
+      );
+    }
+
+    return;
+  }
+
+  session.awaitingQuestion = false;
+
+  await bot.sendMessage(
+    chatId,
+    "⏳ <b>" + FEATURE_NAMES[feature] +
+    " prepare ho raha hai...</b>",
+    {
+      parse_mode: "HTML"
+    }
+  );
+
+  try {
     const answer = await generateAI(
-      prompts[feature],
+      FEATURE_PROMPTS[feature],
       chapterData.text
     );
 
-    session.awaitingQuestion = feature === "ai";
-    session.feature = feature;
-
     await sendLongMessage(chatId, answer);
 
-    if (feature === "ai") {
-      await bot.sendMessage(
-        chatId,
-        "🤖 Ab isi chapter se related apna question bhejein."
-      );
-    }
+    await bot.sendMessage(
+      chatId,
+      "✅ Complete!\n\n" +
+      "Dusra option select karne ke liye Main Menu par jaayein."
+    );
+
   } catch (error) {
     console.error(
-      "AI ERROR:",
+      "FEATURE GENERATION ERROR:",
       error.response?.data || error.message
     );
 
     await bot.sendMessage(
       chatId,
-      "❌ AI content generate nahi hua.\n" +
-      "OpenAI API key, API balance aur model check karein."
+      "❌ Content generate nahi ho paya.\n" +
+      "API key aur OpenAI account check karein."
     );
   }
 }
 
 // ============================================
-// ADMIN: ADD SEMESTER
+// ADMIN: ADD SEMESTER / LEVEL
 // ============================================
 
-bot.onText(/\/addsemester (.+)/, (msg, match) => {
-  if (!isAdmin(msg.from.id)) return;
+bot.onText(/^\/addsemester(?:@\w+)?(?:\s+([\s\S]+))?$/, (msg, match) => {
+  const userId = msg.from.id;
+  const chatId = msg.chat.id;
 
-  const parts = match[1].split("|").map(x => x.trim());
+  if (!isAdmin(userId)) {
+    return bot.sendMessage(chatId, "⛔ Admin only command.");
+  }
+
+  const input = (match[1] || "").trim();
+  const parts = input.split("|").map(x => x.trim());
+
+  if (parts.length < 2 || !db.courses[parts[0]]) {
+    return bot.sendMessage(
+      chatId,
+      "Format:\n/addsemester bp|Semester 1\n\n" +
+      "Courses: bp, dp, cet, class12"
+    );
+  }
 
   const course = parts[0];
   const semester = parts[1];
-
-  if (!db.courses[course] || !semester) {
-    return bot.sendMessage(
-      msg.chat.id,
-      "Format:\n/addsemester bp|Semester 1"
-    );
-  }
 
   db.courses[course].semesters[semester] =
     db.courses[course].semesters[semester] || {
@@ -617,9 +719,10 @@ bot.onText(/\/addsemester (.+)/, (msg, match) => {
 
   saveDB();
 
-  bot.sendMessage(
-    msg.chat.id,
-    "✅ Semester / Level added successfully."
+  return bot.sendMessage(
+    chatId,
+    "✅ Semester / Level add ho gaya:\n" +
+    db.courses[course].name + " - " + semester
   );
 });
 
@@ -627,21 +730,29 @@ bot.onText(/\/addsemester (.+)/, (msg, match) => {
 // ADMIN: ADD UNIT
 // ============================================
 
-bot.onText(/\/addunit (.+)/, (msg, match) => {
-  if (!isAdmin(msg.from.id)) return;
+bot.onText(/^\/addunit(?:@\w+)?(?:\s+([\s\S]+))?$/, (msg, match) => {
+  const userId = msg.from.id;
+  const chatId = msg.chat.id;
 
-  const parts = match[1].split("|").map(x => x.trim());
+  if (!isAdmin(userId)) {
+    return bot.sendMessage(chatId, "⛔ Admin only command.");
+  }
 
-  const course = parts[0];
-  const semester = parts[1];
-  const unit = parts[2];
+  const parts = (match[1] || "")
+    .split("|")
+    .map(x => x.trim());
 
-  if (!db.courses[course] || !semester || !unit) {
+  if (
+    parts.length < 3 ||
+    !db.courses[parts[0]]
+  ) {
     return bot.sendMessage(
-      msg.chat.id,
+      chatId,
       "Format:\n/addunit bp|Semester 1|Unit 1"
     );
   }
+
+  const [course, semester, unit] = parts;
 
   db.courses[course].semesters[semester] =
     db.courses[course].semesters[semester] || {
@@ -658,9 +769,10 @@ bot.onText(/\/addunit (.+)/, (msg, match) => {
 
   saveDB();
 
-  bot.sendMessage(
-    msg.chat.id,
-    "✅ Unit added successfully."
+  return bot.sendMessage(
+    chatId,
+    "✅ Unit add ho gayi:\n" +
+    course + " | " + semester + " | " + unit
   );
 });
 
@@ -668,27 +780,29 @@ bot.onText(/\/addunit (.+)/, (msg, match) => {
 // ADMIN: ADD CHAPTER
 // ============================================
 
-bot.onText(/\/addchapter (.+)/, (msg, match) => {
-  if (!isAdmin(msg.from.id)) return;
+bot.onText(/^\/addchapter(?:@\w+)?(?:\s+([\s\S]+))?$/, (msg, match) => {
+  const userId = msg.from.id;
+  const chatId = msg.chat.id;
 
-  const parts = match[1].split("|").map(x => x.trim());
+  if (!isAdmin(userId)) {
+    return bot.sendMessage(chatId, "⛔ Admin only command.");
+  }
 
-  const course = parts[0];
-  const semester = parts[1];
-  const unit = parts[2];
-  const chapter = parts[3];
+  const parts = (match[1] || "")
+    .split("|")
+    .map(x => x.trim());
 
   if (
-    !db.courses[course] ||
-    !semester ||
-    !unit ||
-    !chapter
+    parts.length < 4 ||
+    !db.courses[parts[0]]
   ) {
     return bot.sendMessage(
-      msg.chat.id,
+      chatId,
       "Format:\n/addchapter bp|Semester 1|Unit 1|Chapter 1"
     );
   }
+
+  const [course, semester, unit, chapter] = parts;
 
   db.courses[course].semesters[semester] =
     db.courses[course].semesters[semester] || {
@@ -703,16 +817,21 @@ bot.onText(/\/addchapter (.+)/, (msg, match) => {
       chapters: {}
     };
 
-  semesterData.units[unit].chapters[chapter] =
-    semesterData.units[unit].chapters[chapter] || {
-      text: ""
+  const unitData = semesterData.units[unit];
+
+  unitData.chapters[chapter] =
+    unitData.chapters[chapter] || {
+      text: "",
+      updatedAt: null
     };
 
   saveDB();
 
-  bot.sendMessage(
-    msg.chat.id,
-    "✅ Chapter added successfully."
+  return bot.sendMessage(
+    chatId,
+    "✅ Chapter add ho gaya:\n" +
+    course + " | " + semester + " | " +
+    unit + " | " + chapter
   );
 });
 
@@ -720,188 +839,156 @@ bot.onText(/\/addchapter (.+)/, (msg, match) => {
 // ADMIN: VIEW STRUCTURE
 // ============================================
 
-bot.onText(/\/structure/, msg => {
-  if (!isAdmin(msg.from.id)) return;
+bot.onText(/^\/structure(?:@\w+)?$/, msg => {
+  const chatId = msg.chat.id;
 
-  sendLongMessage(
-    msg.chat.id,
-    JSON.stringify(db.courses, null, 2)
-  );
+  if (!isAdmin(msg.from.id)) {
+    return bot.sendMessage(chatId, "⛔ Admin only command.");
+  }
+
+  let output = "📚 <b>COURSE STRUCTURE</b>\n\n";
+
+  for (const courseCode of Object.keys(db.courses)) {
+    const course = db.courses[courseCode];
+
+    output += "🎓 <b>" + course.name + "</b>\n";
+
+    for (const semester of Object.keys(course.semesters || {})) {
+      output += "  📖 " + semester + "\n";
+
+      const units = course.semesters[semester].units || {};
+
+      for (const unit of Object.keys(units)) {
+        output += "    📘 " + unit + "\n";
+
+        const chapters = units[unit].chapters || {};
+
+        for (const chapter of Object.keys(chapters)) {
+          const uploaded = chapters[chapter].text ? "✅" : "❌";
+          output += "      " + uploaded + " " + chapter + "\n";
+        }
+      }
+    }
+
+    output += "\n";
+  }
+
+  return sendLongMessage(chatId, output);
 });
 // ============================================
-// INLINE BUTTON CLICK HANDLER
+// TATSAR STUDY BOT
+// PART 3/3
 // ============================================
 
-bot.on("callback_query", async query => {
-  const chatId = query.message.chat.id;
-  const userId = query.from.id;
-  const data = query.data || "";
+// ============================================
+// DELETE CURRENT MENU PAGE
+// ============================================
 
+async function deleteCurrentPage(chatId, userId) {
   const session = getSession(userId);
 
+  if (!session.lastBotMessageId) return;
+
   try {
-    await bot.answerCallbackQuery(query.id);
-
-    // MAIN MENU
-
-    if (data === "nav:home") {
-      return sendHome(chatId, userId);
-    }
-
-    // BACK NAVIGATION
-
-    if (data === "nav:courses") {
-      session.semester = null;
-      session.unit = null;
-      session.chapter = null;
-      return sendCourses(chatId, userId);
-    }
-
-    if (data === "nav:semesters") {
-      session.unit = null;
-      session.chapter = null;
-      return sendSemesters(chatId, userId);
-    }
-
-    if (data === "nav:units") {
-      session.chapter = null;
-      return sendUnits(chatId, userId);
-    }
-
-    if (data === "nav:chapters") {
-      session.chapter = null;
-      return sendChapters(chatId, userId);
-    }
-
-    if (data === "nav:back") {
-      if (session.step === "options") {
-        session.chapter = null;
-        return sendChapters(chatId, userId);
-      }
-
-      if (session.step === "chapter") {
-        session.unit = null;
-        return sendUnits(chatId, userId);
-      }
-
-      if (session.step === "unit") {
-        session.semester = null;
-        return sendSemesters(chatId, userId);
-      }
-
-      if (session.step === "semester") {
-        return sendCourses(chatId, userId);
-      }
-
-      return sendHome(chatId, userId);
-    }
-
-    // FEATURE BUTTONS
-
-    if (data.startsWith("f:")) {
-      const feature = data.substring(2);
-
-      if (!FEATURE_NAMES[feature]) return;
-
-      session.awaitingQuestion = false;
-      session.feature = feature;
-
-      if (session.chapter) {
-        return generateForFeature(
-          chatId,
-          userId,
-          feature
-        );
-      }
-
-      return sendCourses(chatId, userId);
-    }
-
-    // COURSE BUTTONS
-
-    if (data.startsWith("c:")) {
-      const course = data.substring(2);
-
-      if (!db.courses[course]) return;
-
-      session.course = course;
-      session.semester = null;
-      session.unit = null;
-      session.chapter = null;
-      session.awaitingQuestion = false;
-
-      return sendSemesters(chatId, userId);
-    }
-
-    // SEMESTER, UNIT AND CHAPTER BUTTONS
-
-    if (data.startsWith("p:")) {
-      const parts = data.split(":");
-
-      const type = parts[1];
-      const index = Number(parts[2]);
-
-      const items = session.pickMap[type];
-
-      if (
-        !items ||
-        !Number.isInteger(index) ||
-        index < 0 ||
-        index >= items.length
-      ) {
-        return bot.sendMessage(
-          chatId,
-          "Menu expire ho gaya. Dobara /start karein."
-        );
-      }
-
-      const selected = items[index];
-
-      if (type === "semester") {
-        session.semester = selected;
-        session.unit = null;
-        session.chapter = null;
-
-        return sendUnits(chatId, userId);
-      }
-
-      if (type === "unit") {
-        session.unit = selected;
-        session.chapter = null;
-
-        return sendChapters(chatId, userId);
-      }
-
-      if (type === "chapter") {
-        session.chapter = selected;
-        session.awaitingQuestion = false;
-
-        return sendStudyOptions(chatId, userId);
-      }
-    }
-
-  } catch (error) {
-    console.error(
-      "CALLBACK ERROR:",
-      error.message
-    );
-
-    bot.sendMessage(
+    await bot.deleteMessage(
       chatId,
-      "❌ Button process nahi ho paya. Dobara try karein."
-    ).catch(() => {});
+      session.lastBotMessageId
+    );
+  } catch (error) {
+    // Ignore delete errors.
   }
-});
+
+  session.lastBotMessageId = null;
+}
 
 // ============================================
-// ADMIN PDF UPLOAD
+// BACK BUTTON
+// ============================================
+
+async function goBack(chatId, userId) {
+  const session = getSession(userId);
+
+  if (session.step === "courses") {
+    return sendHome(chatId, userId);
+  }
+
+  if (session.step === "semesters") {
+    return sendCourses(chatId, userId);
+  }
+
+  if (session.step === "units") {
+    session.semester = null;
+    return sendSemesters(chatId, userId);
+  }
+
+  if (session.step === "chapters") {
+    session.unit = null;
+    return sendUnits(chatId, userId);
+  }
+
+  if (session.step === "study-options") {
+    session.chapter = null;
+    return sendChapters(chatId, userId);
+  }
+
+  return sendHome(chatId, userId);
+}
+
+// ============================================
+// COURSE BUTTON HANDLER
+// ============================================
+
+async function handleCourse(chatId, userId, courseCode) {
+  const session = getSession(userId);
+
+  if (!db.courses[courseCode]) return;
+
+  session.course = courseCode;
+  session.semester = null;
+  session.unit = null;
+  session.chapter = null;
+  session.awaitingQuestion = false;
+
+  return sendSemesters(chatId, userId);
+}
+
+// ============================================
+// FEATURE BUTTON HANDLER
+// ============================================
+
+async function handleFeature(chatId, userId, feature) {
+  const session = getSession(userId);
+
+  if (!FEATURE_NAMES[feature]) return;
+
+  session.feature = feature;
+  session.awaitingQuestion = false;
+
+  if (session.chapter) {
+    return generateForFeature(
+      chatId,
+      userId,
+      feature
+    );
+  }
+
+  return sendCourses(chatId, userId);
+}
+
+// ============================================
+// TEXT MESSAGE HANDLER
 // ============================================
 
 bot.on("message", async msg => {
+  if (!msg.from || msg.from.is_bot) return;
+
   const chatId = msg.chat.id;
   const userId = msg.from.id;
+  const session = getSession(userId);
 
-  // PDF DOCUMENT
+  // ========================================
+  // PDF UPLOAD BY ADMIN
+  // ========================================
 
   if (msg.document) {
     if (!isAdmin(userId)) {
@@ -920,27 +1007,22 @@ bot.on("message", async msg => {
       );
     }
 
-    const caption = (msg.caption || "").trim();
-
-    const parts = caption.split("|").map(x => x.trim());
-
-    const course = parts[0];
-    const semester = parts[1];
-    const unit = parts[2];
-    const chapter = parts[3];
+    const parts = (msg.caption || "")
+      .split("|")
+      .map(x => x.trim());
 
     if (
-      !db.courses[course] ||
-      !semester ||
-      !unit ||
-      !chapter
+      parts.length < 4 ||
+      !db.courses[parts[0]]
     ) {
       return bot.sendMessage(
         chatId,
-        "PDF ke saath ye caption likhein:\n\n" +
+        "PDF ke saath caption likhein:\n\n" +
         "bp|Semester 1|Unit 1|Chapter 1"
       );
     }
+
+    const [course, semester, unit, chapter] = parts;
 
     try {
       await bot.sendMessage(
@@ -956,7 +1038,8 @@ bot.on("message", async msg => {
         fileLink,
         {
           responseType: "arraybuffer",
-          timeout: 120000
+          timeout: 120000,
+          maxContentLength: 20 * 1024 * 1024
         }
       );
 
@@ -973,8 +1056,6 @@ bot.on("message", async msg => {
           "Scanned PDF ke liye OCR ki zaroorat hogi."
         );
       }
-
-      // CREATE COURSE STRUCTURE IF MISSING
 
       db.courses[course].semesters[semester] =
         db.courses[course].semesters[semester] || {
@@ -998,13 +1079,16 @@ bot.on("message", async msg => {
 
       return bot.sendMessage(
         chatId,
-        "✅ PDF successfully uploaded!\n\n" +
+        "✅ <b>PDF successfully uploaded!</b>\n\n" +
         "📚 Course: " + course + "\n" +
         "📖 Semester: " + semester + "\n" +
         "📘 Unit: " + unit + "\n" +
         "📝 Chapter: " + chapter + "\n\n" +
-        "PDF ka extracted content save ho gaya hai.\n" +
-        "Original PDF users ko nahi bheji jayegi."
+        "PDF content save ho gaya hai.\n" +
+        "Original PDF users ko nahi bheji jayegi.",
+        {
+          parse_mode: "HTML"
+        }
       );
 
     } catch (error) {
@@ -1021,40 +1105,146 @@ bot.on("message", async msg => {
     }
   }
 
-  // IGNORE OTHER DOCUMENTS
+  // ========================================
+  // IGNORE NON-TEXT MESSAGES
+  // ========================================
 
   if (!msg.text) return;
 
   const text = msg.text.trim();
 
-  // IGNORE COMMANDS
-
+  // Commands are handled separately.
   if (text.startsWith("/")) return;
 
-  const session = getSession(userId);
+  // ========================================
+  // MAIN MENU BUTTON
+  // ========================================
 
-  // AI FOLLOW-UP QUESTION
+  if (text === BUTTONS.home) {
+    return sendHome(chatId, userId);
+  }
 
-  if (session.awaitingQuestion && session.chapter) {
-    const chapterData = getChapters(
+  // ========================================
+  // BACK BUTTON
+  // ========================================
+
+  if (text === BUTTONS.back) {
+    return goBack(chatId, userId);
+  }
+
+  // ========================================
+  // FEATURE BUTTONS
+  // ========================================
+
+  const featureMap = {};
+
+  for (const [key, value] of Object.entries(BUTTONS)) {
+    if (FEATURE_NAMES[key]) {
+      featureMap[value] = key;
+    }
+  }
+
+  if (featureMap[text]) {
+    return handleFeature(
+      chatId,
+      userId,
+      featureMap[text]
+    );
+  }
+
+  // ========================================
+  // COURSE BUTTONS
+  // ========================================
+
+  const courseMap = {};
+
+  for (const [key, value] of Object.entries(BUTTONS)) {
+    if (COURSE_NAMES[key]) {
+      courseMap[value] = key;
+    }
+  }
+
+  if (courseMap[text]) {
+    return handleCourse(
+      chatId,
+      userId,
+      courseMap[text]
+    );
+  }
+
+  // ========================================
+  // SEMESTER / LEVEL SELECTION
+  // ========================================
+
+  if (session.step === "semesters") {
+    const semesters = getSemesters(session.course);
+
+    if (semesters.includes(text)) {
+      session.semester = text;
+      session.unit = null;
+      session.chapter = null;
+
+      return sendUnits(chatId, userId);
+    }
+  }
+
+  // ========================================
+  // UNIT SELECTION
+  // ========================================
+
+  if (session.step === "units") {
+    const units = getUnits(
+      session.course,
+      session.semester
+    );
+
+    if (units.includes(text)) {
+      session.unit = text;
+      session.chapter = null;
+
+      return sendChapters(chatId, userId);
+    }
+  }
+
+  // ========================================
+  // CHAPTER SELECTION
+  // ========================================
+
+  if (session.step === "chapters") {
+    const chapters = getChapters(
       session.course,
       session.semester,
       session.unit
-    )[session.chapter];
+    );
+
+    if (chapters[text]) {
+      session.chapter = text;
+      session.awaitingQuestion = false;
+
+      return sendStudyOptions(chatId, userId);
+    }
+  }
+
+  // ========================================
+  // AI FOLLOW-UP QUESTIONS
+  // ========================================
+
+  if (session.awaitingQuestion && session.chapter) {
+    const chapterData = getSelectedChapter(userId);
 
     if (!chapterData || !chapterData.text) {
       session.awaitingQuestion = false;
 
       return bot.sendMessage(
         chatId,
-        "Chapter ka content nahi mila. Dobara chapter select karein."
+        "❌ Chapter ka content nahi mila. Dobara chapter select karein."
       );
     }
 
     try {
-      await bot.sendMessage(
+      await bot.sendChatAction(
         chatId,
-        "⏳ AI answer prepare kar raha hai..."
+        "typing"
       );
 
       const answer = await generateAI(
@@ -1066,21 +1256,38 @@ bot.on("message", async msg => {
 
       return bot.sendMessage(
         chatId,
-        "🤖 Aap isi chapter se aur questions pooch sakte hain."
+        "🤖 Isi chapter se aur question pooch sakte hain.\n" +
+        "Main Menu ke liye neeche button dabayein."
       );
 
     } catch (error) {
       console.error(
         "AI QUESTION ERROR:",
-        error.message
+        error.response?.data || error.message
       );
 
       return bot.sendMessage(
         chatId,
-        "❌ AI answer generate nahi ho paya."
+        "❌ AI answer generate nahi ho paya. API key check karein."
       );
     }
   }
+
+  // ========================================
+  // UNKNOWN MESSAGE
+  // ========================================
+
+  return bot.sendMessage(
+    chatId,
+    "👇 Neeche diye gaye buttons mein se option select karein.",
+    {
+      reply_markup: {
+        keyboard: mainKeyboard(),
+        resize_keyboard: true,
+        is_persistent: true
+      }
+    }
+  );
 });
 
 // ============================================
@@ -1095,13 +1302,13 @@ bot.onText(/^\/start(?:@\w+)?$/, msg => {
 });
 
 // ============================================
-// TELEGRAM MENU COMMANDS
+// TELEGRAM COMMAND MENU
 // ============================================
 
 bot.setMyCommands([
   {
     command: "start",
-    description: "🏠 Open Main Menu"
+    description: "Open Main Menu"
   },
   {
     command: "structure",
@@ -1109,7 +1316,7 @@ bot.setMyCommands([
   },
   {
     command: "addsemester",
-    description: "Admin: Add Semester"
+    description: "Admin: Add Semester or Level"
   },
   {
     command: "addunit",
@@ -1143,7 +1350,7 @@ app.get("/health", (req, res) => {
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(
-    "TATSAR Study Bot running on port " + PORT
+    "TATSAR STUDY BOT RUNNING ON PORT " + PORT
   );
 });
 
@@ -1159,7 +1366,17 @@ bot.on("polling_error", error => {
 });
 
 process.on("unhandledRejection", error => {
-  console.error("UNHANDLED ERROR:", error);
+  console.error(
+    "UNHANDLED ERROR:",
+    error
+  );
+});
+
+process.on("uncaughtException", error => {
+  console.error(
+    "UNCAUGHT EXCEPTION:",
+    error
+  );
 });
 
 console.log("TATSAR STUDY BOT STARTED");
