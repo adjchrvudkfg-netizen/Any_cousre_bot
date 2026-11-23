@@ -60,58 +60,69 @@ function getState(userId) {
   return userState[userId];
 }
 
-function buildBelowCardInlineKeyboard() {
+function greenLabel(label) {
+  return label.startsWith("🟩") ? label : `🟩 ${label}`;
+}
+
+function buildMainMenuInlineKeyboard() {
   const inlineKeyboard = MAIN_MENU_BUTTONS.map((row) =>
     row.map((label) => {
       const idx = MAIN_BUTTON_NAMES.indexOf(label);
       return {
-        text: label,
+        text: greenLabel(label),
         callback_data: `MAIN|${idx}`
       };
     })
   );
 
-  return {
-    reply_markup: {
-      inline_keyboard: inlineKeyboard
-    }
-  };
+  return { inline_keyboard: inlineKeyboard };
 }
 
-function buildCategoryKeyboard() {
+function buildCategoryInlineKeyboard() {
   const rows = [];
   for (let i = 0; i < CATEGORY_LIST.length; i += 2) {
-    rows.push(CATEGORY_LIST.slice(i, i + 2));
+    const pair = CATEGORY_LIST.slice(i, i + 2).map((catName) => {
+      const cIdx = CATEGORY_LIST.indexOf(catName);
+      return {
+        text: greenLabel(catName),
+        callback_data: `CAT|${cIdx}`
+      };
+    });
+    rows.push(pair);
   }
-  rows.push(["⬅️ Back to Main Menu"]);
-  return {
-    reply_markup: {
-      keyboard: rows,
-      resize_keyboard: true
-    }
-  };
+  rows.push([{ text: "⬅️ Back to Main Menu", callback_data: "BACK|MAIN" }]);
+  return { inline_keyboard: rows };
 }
 
-function buildStreamKeyboard(category) {
+function buildStreamInlineKeyboard(cIdx) {
+  const category = CATEGORY_LIST[cIdx];
   const streams = CATEGORIES[category] || [];
   const rows = [];
+
   for (let i = 0; i < streams.length; i += 2) {
-    rows.push(streams.slice(i, i + 2));
+    const pair = streams.slice(i, i + 2).map((streamName) => {
+      const sIdx = streams.indexOf(streamName);
+      return {
+        text: greenLabel(streamName),
+        callback_data: `STR|${cIdx}|${sIdx}`
+      };
+    });
+    rows.push(pair);
   }
-  rows.push(["⬅️ Back to Categories", "🏠 Main Menu"]);
-  return {
-    reply_markup: {
-      keyboard: rows,
-      resize_keyboard: true
-    }
-  };
+
+  rows.push([
+    { text: "⬅️ Categories", callback_data: "BACK|CAT" },
+    { text: "🏠 Main Menu", callback_data: "BACK|MAIN" }
+  ]);
+
+  return { inline_keyboard: rows };
 }
 
-function sendWelcomeCard(chatId, user) {
+function getWelcomeText(user) {
   const firstName = user.first_name || "Student";
   const roleLabel = isAdmin(user.id) ? "Admin" : "Student";
 
-  const text = [
+  return [
     "🌸 - STUDY MATERIAL BOT - 🌸",
     "",
     `👤 Hello, ${firstName}!`,
@@ -131,10 +142,30 @@ function sendWelcomeCard(chatId, user) {
     `🎖️ Access: ${roleLabel}`,
     "━━━━━━━━━━━━━━━━━━━━",
     "",
-    "Tap any button below to begin."
+    "Tap any green button below to begin."
   ].join("\n");
+}
 
-  return bot.sendMessage(chatId, text, buildBelowCardInlineKeyboard());
+function sendWelcomeCard(chatId, user) {
+  return bot.sendMessage(chatId, getWelcomeText(user), {
+    reply_markup: buildMainMenuInlineKeyboard()
+  });
+}
+
+async function editMenuMessage(chatId, messageId, text, inlineKeyboard) {
+  try {
+    return await bot.editMessageText(text, {
+      chat_id: chatId,
+      message_id: messageId,
+      parse_mode: "Markdown",
+      reply_markup: inlineKeyboard
+    });
+  } catch (err) {
+    return bot.sendMessage(chatId, text, {
+      parse_mode: "Markdown",
+      reply_markup: inlineKeyboard
+    });
+  }
 }
 
 function getAiAssistantReply(queryText, state) {
@@ -151,19 +182,6 @@ function getAiAssistantReply(queryText, state) {
     "💡 *Study Tip:* Pehle is topic ka Syllabus points aur Revision Notes dekhein, uske baad PYQ aur MCQ practice karein.",
     "📄 Note: Official PDFs ke liye *Hand Written Notes*, *PYQ Question*, *MCQ Question*, *Mock Test*, ya *Revision Notes* section check karein."
   ].join("\n");
-}
-
-function openCategorySelection(chatId, userId, typeName) {
-  const state = getState(userId);
-  state.selectedType = typeName;
-  state.selectedCategory = null;
-  state.selectedStream = null;
-
-  return bot.sendMessage(
-    chatId,
-    `📚 *${typeName}* select kiya gaya.\n👇 Apni Category chunein:`,
-    { parse_mode: "Markdown", ...buildCategoryKeyboard() }
-  );
 }
 bot.onText(/\/start/, (msg) => {
   const userId = msg.from.id;
@@ -372,12 +390,37 @@ bot.on("document", (msg) => {
   );
 });
 
-// Inline callbacks for Menu Buttons, Units, Chapters & PDFs
-bot.on("callback_query", (query) => {
+// Inline callbacks — Sab kuch usi message ke andar update hota hai
+bot.on("callback_query", async (query) => {
   const chatId = query.message.chat.id;
+  const messageId = query.message.message_id;
   const userId = query.from.id;
   const dataStr = query.data || "";
   const data = loadData();
+  const state = getState(userId);
+
+  if (dataStr === "BACK|MAIN") {
+    state.selectedCategory = null;
+    state.selectedStream = null;
+    await bot.answerCallbackQuery(query.id);
+    return bot.editMessageText(getWelcomeText(query.from), {
+      chat_id: chatId,
+      message_id: messageId,
+      reply_markup: buildMainMenuInlineKeyboard()
+    });
+  }
+
+  if (dataStr === "BACK|CAT") {
+    state.selectedCategory = null;
+    state.selectedStream = null;
+    await bot.answerCallbackQuery(query.id);
+    return editMenuMessage(
+      chatId,
+      messageId,
+      `📚 *${state.selectedType || "Study"}*\n👇 Apni Category chunein:`,
+      buildCategoryInlineKeyboard()
+    );
+  }
 
   if (dataStr.startsWith("MAIN|")) {
     const [, idxStr] = dataStr.split("|");
@@ -385,8 +428,131 @@ bot.on("callback_query", (query) => {
     if (!typeName) {
       return bot.answerCallbackQuery(query.id, { text: "Option nahi mila." });
     }
-    bot.answerCallbackQuery(query.id);
-    return openCategorySelection(chatId, userId, typeName);
+    state.selectedType = typeName;
+    state.selectedCategory = null;
+    state.selectedStream = null;
+    await bot.answerCallbackQuery(query.id);
+    return editMenuMessage(
+      chatId,
+      messageId,
+      `📚 *${typeName}*\n👇 Apni Category chunein:`,
+      buildCategoryInlineKeyboard()
+    );
+  }
+
+  if (dataStr.startsWith("CAT|")) {
+    const [, cIdxStr] = dataStr.split("|");
+    const cIdx = Number(cIdxStr);
+    const category = CATEGORY_LIST[cIdx];
+    if (!category) {
+      return bot.answerCallbackQuery(query.id, { text: "Category nahi mili." });
+    }
+    state.selectedCategory = category;
+    state.selectedStream = null;
+    await bot.answerCallbackQuery(query.id);
+    return editMenuMessage(
+      chatId,
+      messageId,
+      `📚 *${state.selectedType || "Study"}* — *${category}*\n👇 Apna Stream / Group select karein:`,
+      buildStreamInlineKeyboard(cIdx)
+    );
+  }
+
+  if (dataStr.startsWith("STR|")) {
+    const [, cIdxStr, sIdxStr] = dataStr.split("|");
+    const cIdx = Number(cIdxStr);
+    const sIdx = Number(sIdxStr);
+    const cat = CATEGORY_LIST[cIdx];
+    const stream = (CATEGORIES[cat] || [])[sIdx];
+    const type = state.selectedType || "Syllabus";
+
+    if (!cat || !stream) {
+      return bot.answerCallbackQuery(query.id, { text: "Stream nahi mila." });
+    }
+
+    state.selectedCategory = cat;
+    state.selectedStream = stream;
+    const key = `${cat}::${stream}`;
+    const navBack = {
+      inline_keyboard: [
+        [
+          { text: "⬅️ Streams", callback_data: `CAT|${cIdx}` },
+          { text: "🏠 Main Menu", callback_data: "BACK|MAIN" }
+        ]
+      ]
+    };
+
+    await bot.answerCallbackQuery(query.id);
+
+    if (type === "Admit Cards Link") {
+      const list = data.links.admitCards[key] || [];
+      const body =
+        list.length === 0
+          ? "Is stream ke liye abhi Admit Card link update nahi hua hai."
+          : list.map((item, i) => `${i + 1}. [${item.label}](${item.url})`).join("\n");
+
+      return editMenuMessage(
+        chatId,
+        messageId,
+        `🪪 *Admit Cards — ${cat} (${stream})*\n\n${body}`,
+        navBack
+      );
+    }
+
+    if (type === "Result Link") {
+      const list = data.links.results[key] || [];
+      const body =
+        list.length === 0
+          ? "Is stream ke liye abhi Result link update nahi hua hai."
+          : list.map((item, i) => `${i + 1}. [${item.label}](${item.url})`).join("\n");
+
+      return editMenuMessage(
+        chatId,
+        messageId,
+        `📊 *Results — ${cat} (${stream})*\n\n${body}`,
+        navBack
+      );
+    }
+
+    if (type === "AI Assistant") {
+      return editMenuMessage(
+        chatId,
+        messageId,
+        `🤖 *AI Study Assistant* active for *${cat} (${stream})*.\n\nApna topic ya doubt abhi chat mein type karke bhejein!`,
+        navBack
+      );
+    }
+
+    const tIdx = ALLOWED_STUDY_TYPES.indexOf(type);
+    const bucket = getBucket(data, cat, stream, type, false);
+    const units = bucket ? Object.keys(bucket.units) : [];
+
+    if (units.length === 0) {
+      return editMenuMessage(
+        chatId,
+        messageId,
+        `📂 *${cat} > ${stream} > ${type}*\n\nIs section mein abhi koi Unit/PDF add nahi hua hai.`,
+        navBack
+      );
+    }
+
+    const unitRows = units.map((unitName, uIdx) => [
+      {
+        text: greenLabel(unitName),
+        callback_data: `UNIT|${cIdx}|${sIdx}|${tIdx}|${uIdx}`
+      }
+    ]);
+    unitRows.push([
+      { text: "⬅️ Streams", callback_data: `CAT|${cIdx}` },
+      { text: "🏠 Main Menu", callback_data: "BACK|MAIN" }
+    ]);
+
+    return editMenuMessage(
+      chatId,
+      messageId,
+      `📚 *${type}* — *${cat} (${stream})*\n👇 Unit select karein:`,
+      { inline_keyboard: unitRows }
+    );
   }
 
   if (dataStr.startsWith("UNIT|")) {
@@ -403,30 +569,40 @@ bot.on("callback_query", (query) => {
     }
 
     const chapters = Object.keys(bucket.units[unitName].chapters || {});
+    await bot.answerCallbackQuery(query.id);
+
     if (chapters.length === 0) {
-      bot.answerCallbackQuery(query.id);
-      return bot.sendMessage(
+      return editMenuMessage(
         chatId,
-        `📂 *${unitName}*\nIs unit mein abhi koi chapter add nahi hua hai.`,
-        { parse_mode: "Markdown" }
+        messageId,
+        `📂 *${unitName}*\n\nIs unit mein abhi koi chapter add nahi hua hai.`,
+        {
+          inline_keyboard: [
+            [
+              { text: "⬅️ Units", callback_data: `STR|${cIdx}|${sIdx}` },
+              { text: "🏠 Main Menu", callback_data: "BACK|MAIN" }
+            ]
+          ]
+        }
       );
     }
 
-    const buttons = chapters.map((chap, idx) => [
+    const chapRows = chapters.map((chap, idx) => [
       {
-        text: `📘 ${chap}`,
+        text: greenLabel(chap),
         callback_data: `CHAP|${cIdx}|${sIdx}|${tIdx}|${uIdx}|${idx}`
       }
     ]);
+    chapRows.push([
+      { text: "⬅️ Units", callback_data: `STR|${cIdx}|${sIdx}` },
+      { text: "🏠 Main Menu", callback_data: "BACK|MAIN" }
+    ]);
 
-    bot.answerCallbackQuery(query.id);
-    return bot.sendMessage(
+    return editMenuMessage(
       chatId,
+      messageId,
       `📂 *Unit:* ${unitName}\n👇 Chapter select karein:`,
-      {
-        parse_mode: "Markdown",
-        reply_markup: { inline_keyboard: buttons }
-      }
+      { inline_keyboard: chapRows }
     );
   }
 
@@ -440,30 +616,40 @@ bot.on("callback_query", (query) => {
     const chapterName = Object.keys(bucket.units[unitName].chapters)[chIdx];
     const pdfs = bucket.units[unitName].chapters[chapterName] || [];
 
+    await bot.answerCallbackQuery(query.id);
+
     if (pdfs.length === 0) {
-      bot.answerCallbackQuery(query.id);
-      return bot.sendMessage(
+      return editMenuMessage(
         chatId,
-        `📘 *${chapterName}*\nIs chapter mein abhi koi PDF available nahi hai.`,
-        { parse_mode: "Markdown" }
+        messageId,
+        `📘 *${chapterName}*\n\nIs chapter mein abhi koi PDF available nahi hai.`,
+        {
+          inline_keyboard: [
+            [
+              { text: "⬅️ Chapters", callback_data: `UNIT|${cIdx}|${sIdx}|${tIdx}|${uIdx}` },
+              { text: "🏠 Main Menu", callback_data: "BACK|MAIN" }
+            ]
+          ]
+        }
       );
     }
 
-    const buttons = pdfs.map((pdf, pIdx) => [
+    const pdfRows = pdfs.map((pdf, pIdx) => [
       {
-        text: `📄 ${pdf.title}`,
+        text: greenLabel(pdf.title),
         callback_data: `PDF|${cIdx}|${sIdx}|${tIdx}|${uIdx}|${chIdx}|${pIdx}`
       }
     ]);
+    pdfRows.push([
+      { text: "⬅️ Chapters", callback_data: `UNIT|${cIdx}|${sIdx}|${tIdx}|${uIdx}` },
+      { text: "🏠 Main Menu", callback_data: "BACK|MAIN" }
+    ]);
 
-    bot.answerCallbackQuery(query.id);
-    return bot.sendMessage(
+    return editMenuMessage(
       chatId,
+      messageId,
       `📘 *Chapter:* ${chapterName}\n👇 PDF open/download karne ke liye tap karein:`,
-      {
-        parse_mode: "Markdown",
-        reply_markup: { inline_keyboard: buttons }
-      }
+      { inline_keyboard: pdfRows }
     );
   }
 
@@ -481,7 +667,7 @@ bot.on("callback_query", (query) => {
       return bot.answerCallbackQuery(query.id, { text: "PDF nahi mili." });
     }
 
-    bot.answerCallbackQuery(query.id, { text: "PDF bhej rahe hain..." });
+    await bot.answerCallbackQuery(query.id, { text: "PDF bhej rahe hain..." });
     return bot.sendDocument(chatId, pdf.fileId, {
       caption: `📄 *${pdf.title}*\n${category} > ${stream} > ${studyType}\nUnit: ${unitName} | Chapter: ${chapterName}`,
       parse_mode: "Markdown"
@@ -489,7 +675,7 @@ bot.on("callback_query", (query) => {
   }
 });
 
-// Main text & reply button handler
+// AI Assistant text question handler
 bot.on("message", (msg) => {
   if (!msg.text || msg.text.startsWith("/") || msg.document) return;
 
@@ -498,123 +684,11 @@ bot.on("message", (msg) => {
   const text = msg.text.trim();
   const state = getState(userId);
 
-  if (text === "🏠 Main Menu" || text === "⬅️ Back to Main Menu") {
-    state.selectedCategory = null;
-    state.selectedStream = null;
-    return sendWelcomeCard(chatId, msg.from);
-  }
-
-  if (text === "⬅️ Back to Categories") {
-    state.selectedStream = null;
-    return bot.sendMessage(
-      chatId,
-      `📌 *${state.selectedType || "Study"}* ke liye Category select karein:`,
-      { parse_mode: "Markdown", ...buildCategoryKeyboard() }
-    );
-  }
-
-  if (MAIN_BUTTON_NAMES.includes(text)) {
-    return openCategorySelection(chatId, userId, text);
-  }
-
-  if (CATEGORY_LIST.includes(text)) {
-    state.selectedCategory = text;
-    state.selectedStream = null;
-
-    return bot.sendMessage(
-      chatId,
-      `🎯 *Category:* ${text}\n👇 Apna Stream / Group select karein:`,
-      { parse_mode: "Markdown", ...buildStreamKeyboard(text) }
-    );
-  }
-
-  if (state.selectedCategory && (CATEGORIES[state.selectedCategory] || []).includes(text)) {
-    state.selectedStream = text;
-    const type = state.selectedType;
-    const cat = state.selectedCategory;
-    const stream = state.selectedStream;
-    const data = loadData();
-    const key = `${cat}::${stream}`;
-
-    if (type === "Admit Cards Link") {
-      const list = data.links.admitCards[key] || [];
-      if (list.length === 0) {
-        return bot.sendMessage(chatId, `🪪 *${cat} (${stream})* ke liye abhi Admit Card link update nahi hua hai.`, {
-          parse_mode: "Markdown"
-        });
-      }
-      const formatted = list.map((item, i) => `${i + 1}. [${item.label}](${item.url})`).join("\n");
-      return bot.sendMessage(chatId, `🪪 *Admit Cards — ${cat} (${stream})*\n\n${formatted}`, {
-        parse_mode: "Markdown",
-        disable_web_page_preview: true
-      });
-    }
-
-    if (type === "Result Link") {
-      const list = data.links.results[key] || [];
-      if (list.length === 0) {
-        return bot.sendMessage(chatId, `📊 *${cat} (${stream})* ke liye abhi Result link update nahi hua hai.`, {
-          parse_mode: "Markdown"
-        });
-      }
-      const formatted = list.map((item, i) => `${i + 1}. [${item.label}](${item.url})`).join("\n");
-      return bot.sendMessage(chatId, `📊 *Results — ${cat} (${stream})*\n\n${formatted}`, {
-        parse_mode: "Markdown",
-        disable_web_page_preview: true
-      });
-    }
-
-    if (type === "AI Assistant") {
-      return bot.sendMessage(
-        chatId,
-        `🤖 *AI Study Assistant* active for *${cat} (${stream})*.\nApna topic ya doubt message mein type karke bhejein!`,
-        { parse_mode: "Markdown" }
-      );
-    }
-
-    const tIdx = ALLOWED_STUDY_TYPES.indexOf(type);
-    const cIdx = CATEGORY_LIST.indexOf(cat);
-    const sIdx = CATEGORIES[cat].indexOf(stream);
-
-    if (tIdx === -1) {
-      return bot.sendMessage(chatId, "⚠️ Yeh option valid study module mein shamil nahi hai.");
-    }
-
-    const bucket = getBucket(data, cat, stream, type, false);
-    const units = bucket ? Object.keys(bucket.units) : [];
-
-    if (units.length === 0) {
-      return bot.sendMessage(
-        chatId,
-        `📂 *${cat} > ${stream} > ${type}*\nIs section mein abhi koi Unit/PDF add nahi hua hai.`,
-        { parse_mode: "Markdown" }
-      );
-    }
-
-    const unitButtons = units.map((unitName, uIdx) => [
-      {
-        text: `📂 ${unitName}`,
-        callback_data: `UNIT|${cIdx}|${sIdx}|${tIdx}|${uIdx}`
-      }
-    ]);
-
-    return bot.sendMessage(
-      chatId,
-      `📚 *${type}*\n📌 *Scope:* ${cat} — ${stream}\n👇 Unit select karein:`,
-      {
-        parse_mode: "Markdown",
-        reply_markup: { inline_keyboard: unitButtons }
-      }
-    );
-  }
-
   if (state.selectedType === "AI Assistant") {
     return bot.sendMessage(chatId, getAiAssistantReply(text, state), {
       parse_mode: "Markdown"
     });
   }
-
-  return sendWelcomeCard(chatId, msg.from);
 });
 
 console.log("STUDY MATERIAL BOT (server.js) is running...");
