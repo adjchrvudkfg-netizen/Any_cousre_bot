@@ -2,8 +2,14 @@ const express = require('express');
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
-const pdfParse = require('pdf-parse');
 const config = require('./config');
+
+let pdfParse = null;
+try {
+  pdfParse = require('pdf-parse');
+} catch (e) {
+  console.log("⚠️ 'pdf-parse' module not installed; PDF text extraction will use fallback/manual notes.");
+}
 
 const app = express();
 app.use(express.json());
@@ -41,6 +47,7 @@ const MAIN_MENU_BUTTONS = [
 
 const CATEGORIES = {
   "Pharmacy": ["B.Pharma", "D.Pharma"],
+  "Commerce": ["B.Com"],
   "CET": ["CET 12th Level", "CET Graduation Level"],
   "12th": ["Science", "Commerce", "Arts"],
   "SSC": ["SSC GD", "SSC CHSL", "SSC CGL", "SSC MTS"],
@@ -54,7 +61,8 @@ const CATEGORY_LIST = Object.keys(CATEGORIES);
 
 const DEFAULT_YEARS_BY_COURSE = {
   "B.Pharma": ["1st Year", "2nd Year", "3rd Year", "4th Year"],
-  "D.Pharma": ["1st Year", "2nd Year"]
+  "D.Pharma": ["1st Year", "2nd Year"],
+  "B.Com": ["1st Year", "2nd Year", "3rd Year"]
 };
 
 const DEFAULT_SEMESTERS_BY_YEAR = {
@@ -67,6 +75,11 @@ const DEFAULT_SEMESTERS_BY_YEAR = {
   "D.Pharma": {
     "1st Year": ["Year 1 Syllabus"],
     "2nd Year": ["Year 2 Syllabus"]
+  },
+  "B.Com": {
+    "1st Year": ["Semester 1", "Semester 2"],
+    "2nd Year": ["Semester 3", "Semester 4"],
+    "3rd Year": ["Semester 5", "Semester 6"]
   }
 };
 
@@ -96,20 +109,7 @@ const DEFAULT_DIRECT_SEMESTERS_BY_COURSE = {
 };
 
 let studyDb = {
-  // materials[category][course][periodKey][studyType][subjectName] = {
-  //   units: {
-  //     [unitName]: {
-  //       topics: [string],
-  //       handwrittenNotes: string,
-  //       pyqQuestions: [string],
-  //       mcqQuestions: [string],
-  //       mockQuestions: [string],
-  //       revisionNotes: string
-  //     }
-  //   }
-  // }
   materials: {},
-  // uploadedPdfs: admin ke through upload ki gayi sabhi PDFs ka text & metadata
   uploadedPdfs: [],
   customYears: {},
   customSemesters: {},
@@ -321,7 +321,6 @@ function ensureUnitRecord(category, course, periodKey, studyType, subjectName, u
   return bucket.subjects[subjectName].units[unitName];
 }
 
-// Language detection: 'hindi' (Devanagari), 'hinglish', or 'english'
 function detectLanguage(text) {
   if (/[\u0900-\u097F]/.test(text)) {
     return "hindi";
@@ -341,58 +340,60 @@ function detectLanguage(text) {
   return "english";
 }
 
-function buildHandwrittenText(rawText, title, lang) {
+function buildHandwrittenMessages(rawText, title, lang) {
   const cleanLines = (rawText || "")
     .split(/\r?\n/)
-    .map((l) => l.trim())
+    .map((l) => l.replace(/\s+/g, " ").trim())
     .filter(Boolean);
 
-  const bullets = cleanLines
-    .slice(0, 14)
-    .map((line) => (line.length > 220 ? `${line.slice(0, 217)}...` : line))
-    .map((line) => `  ✍️ • ${line}`)
-    .join("\n");
-
-  if (!bullets) {
+  if (cleanLines.length === 0) {
     if (lang === "hindi") {
-      return `✍️ *हस्तलिखित नोट्स — ${title}*\n\n  ✍️ • अभी इस भाग के नोट्स अपडेट किए जा रहे हैं।`;
+      return [`✍️ *हस्तलिखित नोट्स — ${title}*\n\n  ✍️ • अभी इस भाग के नोट्स अपडेट किए जा रहे हैं।`];
     }
     if (lang === "english") {
-      return `✍️ *Handwritten Notebook Notes — ${title}*\n\n  ✍️ • Notebook content for this section is being updated.`;
+      return [`✍️ *Handwritten Notebook Notes — ${title}*\n\n  ✍️ • Notebook content for this section is being updated.`];
     }
-    return `✍️ *Hand Written Notes — ${title}*\n\n  ✍️ • Is topic ke haath se likhe hue notes update kiye ja rahe hain.`;
+    return [`✍️ *Hand Written Notes — ${title}*\n\n  ✍️ • Is topic ke haath se likhe hue notes update kiye ja rahe hain.`];
   }
 
-  if (lang === "hindi") {
-    return (
-`✍️ *हस्तलिखित नोट्स (Notebook Style)*
-📌 *शीर्षक:* ${title}
-──────────────────────
-${bullets}
-──────────────────────
-📝 *परीक्षा टिप:* मुख्य परिभाषा, वर्गीकरण/बिंदु और उदाहरण साफ अक्षरों में लिखें।`
-    );
+  const header =
+    lang === "hindi"
+      ? `✍️ *हस्तलिखित नोट्स (पूरी PDF — Notebook Style)*\n📌 *शीर्षक:* ${title}\n──────────────────────\n`
+      : lang === "english"
+        ? `✍️ *Handwritten Notebook Notes (Full PDF)*\n📌 *Topic:* ${title}\n──────────────────────\n`
+        : `✍️ *Hand Written Notes (Poori PDF — Notebook Style)*\n📌 *Topic:* ${title}\n──────────────────────\n`;
+
+  const footer =
+    lang === "hindi"
+      ? `\n──────────────────────\n📝 *परीक्षा टिप:* मुख्य परिभाषा, वर्गीकरण और उदाहरण साफ अक्षरों में लिखें।`
+      : lang === "english"
+        ? `\n──────────────────────\n📝 *Exam Tip:* Highlight definitions, key points/classifications, and neat examples.`
+        : `\n──────────────────────\n📝 *Exam Tip:* Definition, main points/classification, aur examples saaf tarike se likhein.`;
+
+  const maxChunkLen = 3400;
+  const chunks = [];
+  let current = header;
+
+  for (const line of cleanLines) {
+    const wrappedLine = `  ✍️ • ${line}\n`;
+    if ((current + wrappedLine).length > maxChunkLen) {
+      chunks.push(current + footer);
+      current = `${header}${wrappedLine}`;
+    } else {
+      current += wrappedLine;
+    }
   }
 
-  if (lang === "english") {
-    return (
-`✍️ *Handwritten Notebook Notes*
-📌 *Topic:* ${title}
-──────────────────────
-${bullets}
-──────────────────────
-📝 *Exam Tip:* Highlight definitions, key points/classifications, and neat examples.`
-    );
+  if (current.trim().length > 0) {
+    chunks.push(current + footer);
   }
 
-  return (
-`✍️ *Hand Written Notes (Notebook Style)*
-📌 *Topic:* ${title}
-──────────────────────
-${bullets}
-──────────────────────
-📝 *Exam Tip:* Definition, main points/classification, aur examples saaf tarike se likhein.`
-  );
+  return chunks;
+}
+
+function buildHandwrittenPreview(rawText, title, lang) {
+  const msgs = buildHandwrittenMessages(rawText, title, lang);
+  return msgs[0];
 }
 
 function searchAdminPdfsForQuery(query) {
@@ -424,14 +425,14 @@ function searchAdminPdfsForQuery(query) {
       if (keywords.some((kw) => lLower.includes(kw))) {
         matchedLines.push(line);
       }
-      if (matchedLines.length >= 8) break;
+      if (matchedLines.length >= 10) break;
     }
 
     if (score > 0 || matchedLines.length > 0) {
       matches.push({
         pdf,
         score,
-        excerpt: matchedLines.join("\n") || lines.slice(0, 6).join("\n")
+        excerpt: matchedLines.join("\n") || lines.slice(0, 8).join("\n")
       });
     }
   }
@@ -476,7 +477,7 @@ function collectStoredQuestionsForQuery(query) {
   return { pyqs, mocks };
 }
 
-function buildSmartAiAssistantResponse(query, user) {
+function buildSmartAiAssistantResponse(query) {
   const lang = detectLanguage(query);
   const matches = searchAdminPdfsForQuery(query);
   const { pyqs, mocks } = collectStoredQuestionsForQuery(query);
@@ -487,9 +488,9 @@ function buildSmartAiAssistantResponse(query, user) {
     : (studyDb.uploadedPdfs.length > 0 ? "Admin Uploaded PDFs" : "General Study Knowledge");
 
   const handwrittenSnippet = bestMatch
-    ? buildHandwrittenText(bestMatch.excerpt, `${query} — ${sourceLabel}`, lang)
-    : buildHandwrittenText(
-        `Topic "${query}" ke main concepts ko points mein samjhein.\nKey definitions, classification/steps, aur examples par focus karein.\nAgar is topic ki PDF admin ne upload ki hai toh uske headings aur notes yahan aayenge.`,
+    ? buildHandwrittenPreview(bestMatch.excerpt, `${query} — ${sourceLabel}`, lang)
+    : buildHandwrittenPreview(
+        `Topic "${query}" ke main concepts ko points mein samjhein.\nKey definitions, classification/steps, aur examples par focus karein.`,
         query,
         lang
       );
@@ -497,10 +498,10 @@ function buildSmartAiAssistantResponse(query, user) {
   const pyqSectionText = pyqs.length > 0
     ? pyqs.slice(0, 6).map((q, i) => `  • PYQ ${i + 1}: ${q}`).join("\n")
     : (lang === "hindi"
-        ? "  • अभी इस विषय के लिए सहेजे गए PYQ प्रश्न नहीं मिले (आप /add_pyq से जोड़ सकते हैं)।"
+        ? "  • अभी इस विषय के लिए सहेजे गए PYQ प्रश्न नहीं मिले।"
         : lang === "english"
-          ? "  • No saved PYQ questions found for this exact topic yet (admins can add via /add_pyq)."
-          : "  • Is topic ke liye abhi saved PYQ questions nahi mile (admin /add_pyq se daal sakte hain).");
+          ? "  • No saved PYQ questions found for this exact topic yet."
+          : "  • Is topic ke liye abhi saved PYQ questions nahi mile.");
 
   const mockSectionText = mocks.length > 0
     ? mocks.slice(0, 5).map((q, i) => `  • Mock ${i + 1}: ${q}`).join("\n")
@@ -527,10 +528,10 @@ ${handwrittenSnippet}
 ${pyqSectionText}
 ${mockSectionText}
 
-✍️ *उत्तर कैसे लिखना चाहिए (Answer Writing Guide):*
-  1. *परिभाषा / परिचय:* 2–3 स्पष्ट पंक्तियों में विषय की शुरुआत करें।
+✍️ *उत्तर कैसे लिखना चाहिए:*
+  1. *परिभाषा / परिचय:* 2–3 स्पष्ट पंक्तियों में शुरुआत करें।
   2. *मुख्य बिंदु / वर्गीकरण:* बुलेट या हेडिंग के साथ व्यवस्थित बिंदु लिखें।
-  3. *उदाहरण / रेखाचित्र:* जहाँ संभव हो वहाँ उदाहरण या सरल डायग्राम/फ्लोचार्ट बनाएँ।
+  3. *उदाहरण / रेखाचित्र:* जहाँ संभव हो वहाँ उदाहरण या सरल डायग्राम बनाएँ।
   4. *निष्कर्ष:* अंत में 1–2 पंक्तियों में सारांश लिखें।`
     );
   }
@@ -576,7 +577,7 @@ ${handwrittenSnippet}
 ${pyqSectionText}
 ${mockSectionText}
 
-✍️ *Answer Kaise Likhna Hai (Writing Structure):*
+✍️ *Answer Kaise Likhna Hai:*
   1. *Introduction / Definition:* Pehle 2–3 line mein clear definition likhein.
   2. *Main Points / Classification:* Headings aur bullet points mein neat points likhein.
   3. *Examples / Flow Diagram:* Jahan zaroorat ho wahan example ya simple diagram banayein.
@@ -595,7 +596,7 @@ function getMainMenuMarkup(user) {
 📚 <b>Your Complete Study Assistant</b>
 
 ➖ 📖 <b>Syllabus</b> (Subject > Units & Topics Text)
-➖ ✍️ <b>Hand Written Notes</b> (Notebook Style Text)
+➖ ✍️ <b>Hand Written Notes</b> (Full Notebook Style Text)
 ➖ 📝 <b>PYQ Question</b> (Chapter Wise Past Questions)
 ➖ 🧠 <b>MCQ Question</b>
 ➖ 🎯 <b>Mock Test</b> (Chapter Wise Practice Questions)
@@ -641,7 +642,6 @@ app.post('/webhook', async (req, res) => {
       const text = (update.message.text || "").trim();
       const user = getUser(from.id, from.first_name);
 
-      // Admin PDF upload -> Extract text into DB for Hand Written Notes & AI Assistant search
       if (update.message.document) {
         if (!isAdmin(from.id)) {
           await axios.post(`${TELEGRAM_API}/sendMessage`, {
@@ -669,19 +669,21 @@ app.post('/webhook', async (req, res) => {
         const flow = user.adminUploadFlow || {};
         let extractedText = "";
 
-        try {
-          const fileInfoRes = await axios.get(`${TELEGRAM_API}/getFile`, {
-            params: { file_id: doc.file_id }
-          });
-          const filePath = fileInfoRes.data && fileInfoRes.data.result && fileInfoRes.data.result.file_path;
-          if (filePath) {
-            const fileUrl = `https://api.telegram.org/file/bot${TOKEN}/${filePath}`;
-            const pdfBufferRes = await axios.get(fileUrl, { responseType: "arraybuffer" });
-            const parsedPdf = await pdfParse(Buffer.from(pdfBufferRes.data));
-            extractedText = (parsedPdf.text || "").trim();
+        if (pdfParse) {
+          try {
+            const fileInfoRes = await axios.get(`${TELEGRAM_API}/getFile`, {
+              params: { file_id: doc.file_id }
+            });
+            const filePath = fileInfoRes.data && fileInfoRes.data.result && fileInfoRes.data.result.file_path;
+            if (filePath) {
+              const fileUrl = `https://api.telegram.org/file/bot${TOKEN}/${filePath}`;
+              const pdfBufferRes = await axios.get(fileUrl, { responseType: "arraybuffer" });
+              const parsedPdf = await pdfParse(Buffer.from(pdfBufferRes.data));
+              extractedText = (parsedPdf.text || "").trim();
+            }
+          } catch (pdfErr) {
+            console.log("PDF parse error:", pdfErr.message);
           }
-        } catch (pdfErr) {
-          console.log("PDF parse error:", pdfErr.message);
         }
 
         const pdfRecord = {
@@ -729,7 +731,7 @@ app.post('/webhook', async (req, res) => {
 📝 <b>Extracted Text Length:</b> ${extractedText.length} characters
 📚 <b>Total Indexed PDFs:</b> ${studyDb.uploadedPdfs.length}
 
-<i>Ab students ko Syllabus mein PDF nahi balki text milega, aur Hand Written Notes + AI Assistant isi text mein se handwritten style notes & answers denge.</i>`,
+<i>Ab Hand Written Notes mein poori PDF ka handwritten-style text aayega aur AI Assistant isi PDF text mein se search karega.</i>`,
           parse_mode: "HTML"
         });
         return;
@@ -762,7 +764,6 @@ app.post('/webhook', async (req, res) => {
           reply_markup: menu.reply_markup
         });
       }
-      // ADMIN: /add_topic Category | Course | YearOrNone | Semester | Subject | Unit | Topic1, Topic2, ...
       else if (text.startsWith('/add_topic')) {
         if (!isAdmin(from.id)) return;
         const parts = text.replace('/add_topic', '').trim().split('|').map((s) => s.trim());
@@ -791,7 +792,6 @@ app.post('/webhook', async (req, res) => {
           parse_mode: "HTML"
         });
       }
-      // ADMIN: /set_notes Category | Course | YearOrNone | Semester | Subject | Unit | Notes Text
       else if (text.startsWith('/set_notes')) {
         if (!isAdmin(from.id)) return;
         const parts = text.replace('/set_notes', '').trim().split('|').map((s) => s.trim());
@@ -818,7 +818,6 @@ app.post('/webhook', async (req, res) => {
           parse_mode: "HTML"
         });
       }
-      // ADMIN: /add_pyq Category | Course | YearOrNone | Semester | Subject | Unit | Question1; Question2
       else if (text.startsWith('/add_pyq')) {
         if (!isAdmin(from.id)) return;
         const parts = text.replace('/add_pyq', '').trim().split('|').map((s) => s.trim());
@@ -845,7 +844,6 @@ app.post('/webhook', async (req, res) => {
           parse_mode: "HTML"
         });
       }
-      // ADMIN: /add_mock Category | Course | YearOrNone | Semester | Subject | Unit | Q1; Q2
       else if (text.startsWith('/add_mock')) {
         if (!isAdmin(from.id)) return;
         const parts = text.replace('/add_mock', '').trim().split('|').map((s) => s.trim());
@@ -872,7 +870,6 @@ app.post('/webhook', async (req, res) => {
           parse_mode: "HTML"
         });
       }
-      // ADMIN: /add_pdf Category | Course | YearOrNone | Semester | Subject | Unit | PDF Title
       else if (text.startsWith('/add_pdf')) {
         if (!isAdmin(from.id)) return;
         const parts = text.replace('/add_pdf', '').trim().split('|').map((s) => s.trim());
@@ -902,7 +899,7 @@ app.post('/webhook', async (req, res) => {
 
         await axios.post(`${TELEGRAM_API}/sendMessage`, {
           chat_id: chatId,
-          text: `📎 Ab <b>${title}</b> ke liye PDF bhejein. Bot uska text extract karke Handwritten Notes aur AI Assistant search mein jodega.`,
+          text: `📎 Ab <b>${title}</b> ke liye PDF bhejein. Bot uska text extract karke Hand Written Notes aur AI Assistant mein jodega.`,
           parse_mode: "HTML"
         });
       }
@@ -920,9 +917,8 @@ app.post('/webhook', async (req, res) => {
         }
         await axios.post(`${TELEGRAM_API}/sendMessage`, { chat_id: chatId, text: "✅ Broadcast sent!" });
       }
-      // AI Assistant message handler
       else if (user.selectedType === "AI Assistant" && text.length > 0) {
-        const reply = buildSmartAiAssistantResponse(text, user);
+        const reply = buildSmartAiAssistantResponse(text);
         await axios.post(`${TELEGRAM_API}/sendMessage`, {
           chat_id: chatId,
           text: reply,
@@ -954,7 +950,6 @@ app.post('/webhook', async (req, res) => {
           reply_markup: menu.reply_markup
         });
       }
-      // Step 1: Study Type -> Show Categories
       else if (data.startsWith("type_")) {
         const idx = parseInt(data.replace("type_", ""), 10);
         const typeName =
@@ -1006,7 +1001,6 @@ Bot admin ki uploaded PDFs mein se topic dhoondh kar:
           reply_markup: { inline_keyboard: catButtons }
         });
       }
-      // Step 2: Category -> Show Courses
       else if (data.startsWith("cat_")) {
         const cIdx = parseInt(data.replace("cat_", ""), 10);
         const catName = CATEGORY_LIST[cIdx];
@@ -1030,7 +1024,6 @@ Bot admin ki uploaded PDFs mein se topic dhoondh kar:
           reply_markup: { inline_keyboard: courseButtons }
         });
       }
-      // Step 3: Course -> If Years exist, show Years; else show Semesters
       else if (data.startsWith("str_")) {
         const [, cIdxStr, sIdxStr] = data.split("_");
         const cIdx = parseInt(cIdxStr, 10);
@@ -1102,7 +1095,6 @@ Bot admin ki uploaded PDFs mein se topic dhoondh kar:
           reply_markup: { inline_keyboard: semButtons }
         });
       }
-      // Step 3B: Year -> Show Semesters
       else if (data.startsWith("yr_")) {
         const [, cIdxStr, sIdxStr, yIdxStr] = data.split("_");
         const cIdx = parseInt(cIdxStr, 10);
@@ -1135,7 +1127,6 @@ Bot admin ki uploaded PDFs mein se topic dhoondh kar:
           reply_markup: { inline_keyboard: semButtons }
         });
       }
-      // Step 4: Semester -> Show Subjects
       else if (data.startsWith("sem_")) {
         const [, cIdxStr, sIdxStr, yPart, semIdxStr] = data.split("_");
         const cIdx = parseInt(cIdxStr, 10);
@@ -1185,9 +1176,6 @@ Bot admin ki uploaded PDFs mein se topic dhoondh kar:
           reply_markup: { inline_keyboard: subjButtons }
         });
       }
-      // Step 5: Subject selected
-      // - If Syllabus: Immediately show ONLY text message with Unit/Chapter count & Topics inside each Unit/Chapter (NO PDF!)
-      // - If Hand Written Notes / PYQ Question / Mock Test: Show Units/Chapters buttons
       else if (data.startsWith("subj_")) {
         const [, cIdxStr, sIdxStr, yPart, semIdxStr, tIdxStr, sbIdxStr] = data.split("_");
         const cIdx = parseInt(cIdxStr, 10);
@@ -1210,29 +1198,28 @@ Bot admin ki uploaded PDFs mein se topic dhoondh kar:
 
         await deletePrevMessage();
 
-        // SYLLABUS = ONLY TEXT MESSAGE (Units/Chapters count + Topics inside each)
         if (studyType === "Syllabus") {
           let syllabusBody = "";
           if (unitNames.length === 0) {
-            syllabusBody = "Is subject mein abhi koi unit / chapter add nahi hua hai.";
+            syllabusBody = "Is subject mein abhi koi unit / topic add nahi hua hai.";
           } else {
             syllabusBody = unitNames
               .map((uName, idx) => {
                 const tList = unitsObj[uName].topics || [];
                 const topicLines = tList.length > 0
-                  ? tList.map((tp) => `   • ${tp}`).join("\n")
-                  : "   • (Topics add karna baaki hai)";
-                return `<b>${idx + 1}. ${uName}</b>\n${topicLines}`;
+                  ? tList.map((tp, tIndex) => `   ${tIndex + 1}. ${tp}`).join("\n")
+                  : "   • (Is unit ke topics add karna baaki hai)";
+                return `📂 <b>Unit ${idx + 1}: ${uName}</b>\n${topicLines}`;
               })
-              .join("\n\n");
+              .join("\n\n──────────────────────\n\n");
           }
 
           await axios.post(`${TELEGRAM_API}/sendMessage`, {
             chat_id: chatId,
             text:
 `📖 <b>SYLLABUS — ${subjectName}</b>
-🎓 ${courseName} > ${periodKey}
-📊 <b>Total Units / Chapters:</b> ${unitNames.length}
+🎓 <b>Course:</b> ${courseName} (${periodKey})
+📊 <b>Total Units:</b> ${unitNames.length}
 
 ${syllabusBody}`,
             parse_mode: "HTML",
@@ -1267,7 +1254,6 @@ ${syllabusBody}`,
           reply_markup: { inline_keyboard: unitButtons }
         });
       }
-      // Step 6: Unit/Chapter selected for Hand Written Notes / PYQ Question / Mock Test
       else if (data.startsWith("sunit_")) {
         const [, cIdxStr, sIdxStr, yPart, semIdxStr, tIdxStr, sbIdxStr, uIdxStr] = data.split("_");
         const cIdx = parseInt(cIdxStr, 10);
@@ -1301,17 +1287,27 @@ ${syllabusBody}`,
             .map((p) => p.extractedText)
             .join("\n");
 
-          const sourceText = (unitRec && unitRec.handwrittenNotes) || combinedPdfText || (unitRec && (unitRec.topics || []).join("\n")) || "";
-          const formattedNotes = buildHandwrittenText(sourceText, `${subjectName} — ${unitName}`, lang);
+          const sourceText =
+            (unitRec && unitRec.handwrittenNotes) ||
+            combinedPdfText ||
+            (unitRec && (unitRec.topics || []).join("\n")) ||
+            "";
 
-          await axios.post(`${TELEGRAM_API}/sendMessage`, {
-            chat_id: chatId,
-            text: formattedNotes,
-            parse_mode: "Markdown",
-            reply_markup: {
-              inline_keyboard: [[{ text: "🔙 Main Menu", callback_data: "main_menu" }]]
-            }
-          });
+          const noteMessages = buildHandwrittenMessages(sourceText, `${subjectName} — ${unitName}`, lang);
+
+          for (let i = 0; i < noteMessages.length; i++) {
+            const isLast = i === noteMessages.length - 1;
+            const partLabel = noteMessages.length > 1 ? `\n📄 *Part ${i + 1} / ${noteMessages.length}*` : "";
+
+            await axios.post(`${TELEGRAM_API}/sendMessage`, {
+              chat_id: chatId,
+              text: `${noteMessages[i]}${partLabel}`,
+              parse_mode: "Markdown",
+              reply_markup: isLast
+                ? { inline_keyboard: [[{ text: "🔙 Main Menu", callback_data: "main_menu" }]] }
+                : undefined
+            });
+          }
           return;
         }
 
