@@ -27,13 +27,15 @@ if (!TOKEN) {
 }
 
 const TELEGRAM_API = `https://api.telegram.org/bot${TOKEN}`;
+const rawAdminIds = process.env.ADMIN_IDS || config.ADMIN_IDS || '';
 const ADMIN_IDS = new Set([
   8805135936,
-  ...(process.env.ADMIN_IDS || config.ADMIN_IDS || '')
+  ...String(rawAdminIds)
     .split(',')
-    .map((id) => Number(id.trim()))
+    .map((id) => Number(String(id).trim()))
     .filter((id) => !Number.isNaN(id) && id > 0)
 ]);
+
 const SUPPORT_CHANNEL = process.env.SUPPORT_CHANNEL || config.SUPPORT_CHANNEL || "https://t.me/adityachoudhary5";
 
 const dbFilePath = path.join(__dirname, 'study_material_db.json');
