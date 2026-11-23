@@ -50,8 +50,7 @@ const ALLOWED_STUDY_TYPES = [
 const MAIN_MENU_BUTTONS = [
   ["Syllabus", "Hand Written Notes"],
   ["PYQ Question", "Mock Test"],
-  ["AI Assistant", "Admit Cards Link"],
-  ["Result Link"]
+  ["AI Assistant", "🔗 Links"]
 ];
 
 let CATEGORIES = {
@@ -114,20 +113,35 @@ const DEFAULT_DIRECT_SEMESTERS_BY_COURSE = {
   "Agniveer SSR": ["Stage 1"],
   "Agniveer MR": ["Stage 1"]
 };
+
 let studyDb = {
   materials: {},
   uploadedPdfs: [],
   customYears: {},
   customSemesters: {},
-  links: {
-    admitCards: {},
-    results: {}
+  examLinks: {
+    "Admit Card": [],
+    "Result": []
   },
   users: {}
 };
 
+function ensureDbDefaults() {
+  if (!studyDb.materials || typeof studyDb.materials !== "object") studyDb.materials = {};
+  if (!Array.isArray(studyDb.uploadedPdfs)) studyDb.uploadedPdfs = [];
+  if (!studyDb.customYears || typeof studyDb.customYears !== "object") studyDb.customYears = {};
+  if (!studyDb.customSemesters || typeof studyDb.customSemesters !== "object") studyDb.customSemesters = {};
+  if (!studyDb.examLinks || typeof studyDb.examLinks !== "object") {
+    studyDb.examLinks = { "Admit Card": [], "Result": [] };
+  }
+  if (!Array.isArray(studyDb.examLinks["Admit Card"])) studyDb.examLinks["Admit Card"] = [];
+  if (!Array.isArray(studyDb.examLinks["Result"])) studyDb.examLinks["Result"] = [];
+  if (!studyDb.users || typeof studyDb.users !== "object") studyDb.users = {};
+}
+
 function saveData() {
   try {
+    ensureDbDefaults();
     fs.writeFileSync(dbFilePath, JSON.stringify(studyDb, null, 2), 'utf8');
   } catch (e) {
     console.log("❌ Error saving database:", e.message);
@@ -146,33 +160,40 @@ try {
       if (parsed.uploadedPdfs) studyDb.uploadedPdfs = parsed.uploadedPdfs;
       if (parsed.customYears) studyDb.customYears = parsed.customYears;
       if (parsed.customSemesters) studyDb.customSemesters = parsed.customSemesters;
-      if (parsed.links) {
-        studyDb.links = {
-          admitCards: parsed.links.admitCards || {},
-          results: parsed.links.results || {}
+      if (parsed.examLinks && typeof parsed.examLinks === "object") {
+        studyDb.examLinks = {
+          "Admit Card": Array.isArray(parsed.examLinks["Admit Card"]) ? parsed.examLinks["Admit Card"] : [],
+          "Result": Array.isArray(parsed.examLinks["Result"]) ? parsed.examLinks["Result"] : []
         };
       }
       if (parsed.users) studyDb.users = parsed.users;
+      ensureDbDefaults();
       console.log("✅ Study Material database loaded successfully!");
     }
   } else {
+    ensureDbDefaults();
     saveData();
   }
 } catch (e) {
   console.log("⚠️ Error loading database, using default:", e.message);
+  ensureDbDefaults();
 }
 
 function persistAll() {
   try {
+    ensureDbDefaults();
     const payload = { ...studyDb, categories: CATEGORIES };
     fs.writeFileSync(dbFilePath, JSON.stringify(payload, null, 2), 'utf8');
   } catch (e) {
     console.log("❌ Error persisting database:", e.message);
   }
 }
-
 function getCategoryList() {
   return Object.keys(CATEGORIES);
+}
+
+function getCoursesForCategory(category) {
+  return Array.isArray(CATEGORIES[category]) ? CATEGORIES[category] : [];
 }
 
 function isAdmin(userId) {
@@ -257,6 +278,7 @@ function getSemestersForCourse(category, course, yearName = null) {
 
   return merged;
 }
+
 axios.interceptors.request.use((request) => {
   try {
     const data = request.data;
@@ -277,7 +299,10 @@ axios.interceptors.request.use((request) => {
               text.includes("Syllabus") ||
               text.includes("Hand Written Notes") ||
               text.includes("Year") ||
-              text.includes("Semester")
+              text.includes("Semester") ||
+              text.includes("Links") ||
+              text.includes("Admit Card") ||
+              text.includes("Result")
             ) {
               style = "primary";
             } else if (text.includes("Back") || text.includes("Main Menu")) {
@@ -301,7 +326,7 @@ axios.interceptors.request.use((request) => {
 });
 
 function buildPeriodStorageKey(yearName, semesterName) {
-  return yearName ? `${yearName} >${semesterName}` : semesterName;
+  return yearName ? `${yearName} > ${semesterName}` : semesterName;
 }
 
 function getSubjectBucket(category, course, periodKey, studyType, createIfMissing = false) {
@@ -343,6 +368,7 @@ function ensureUnitRecord(category, course, periodKey, studyType, subjectName, u
     bucket.subjects[subjectName].units[unitName] = {
       topics: [],
       handwrittenNotes: "",
+      pdfs: [],
       pyqQuestions: [],
       pyqStructured: {
         mcq: [],
@@ -352,6 +378,9 @@ function ensureUnitRecord(category, course, periodKey, studyType, subjectName, u
       mockQuestions: [],
       mockMcqSet: []
     };
+  }
+  if (!Array.isArray(bucket.subjects[subjectName].units[unitName].pdfs)) {
+    bucket.subjects[subjectName].units[unitName].pdfs = [];
   }
   if (!bucket.subjects[subjectName].units[unitName].pyqStructured) {
     bucket.subjects[subjectName].units[unitName].pyqStructured = {
@@ -408,55 +437,92 @@ function cleanPdfLine(rawLine) {
   return s;
 }
 
-function buildHandwrittenMessages(rawText, title) {
-  const rawLines = (rawText || "").split(/\r?\n/);
-  const cleanedLines = rawLines.map(cleanPdfLine).filter(Boolean);
+function buildStructuredNotesText(rawText, unitTitle, subjectTitle = "") {
+  const cleanedLines = (rawText || "")
+    .split(/\r?\n/)
+    .map(cleanPdfLine)
+    .filter(Boolean);
 
-  const titleParts = String(title || "").split("—");
-  const unitPart = titleParts.length > 1 ? titleParts.slice(1).join("—").trim() : String(title || "").trim();
-  const unitMatch = unitPart.match(/^(unit\s*\d+)\s*[-–—:]\s*(.+)$/i);
-
-  const unitLabel = unitMatch
-    ? `${escapeMarkdownText(unitMatch[1].replace(/\b\w/g, (c) => c.toUpperCase()))}: *${escapeMarkdownText(unitMatch[2].trim())}*`
-    : `*${escapeMarkdownText(unitPart)}*`;
+  const chapterUnitLine = subjectTitle
+    ? `Chapter / Unit: ${unitTitle} (${subjectTitle})`
+    : `Chapter / Unit: ${unitTitle}`;
 
   if (cleanedLines.length === 0) {
-    return [
-      `📓 *NOTEBOOK PAGE — ${unitLabel}*\n━━━━━━━━━━━━━━━━━━━━━━\n✍️ • Is unit ke notes abhi available nahi hain.`
-    ];
+    return `${chapterUnitLine}\n\nMain Heading\nHeading - Definition\nIs unit ke notes abhi available nahi hain.`;
   }
 
-  const notebookLines = [];
+  let out = `${chapterUnitLine}\n\nMain Heading\n`;
+  let activeHeading = "Core Topic";
+  let startedSection = false;
+
   for (const line of cleanedLines) {
-    const safeLine = escapeMarkdownText(line);
     if (isLikelyHeading(line)) {
-      const cleanHeading = safeLine.replace(/:$/, "");
-      notebookLines.push(`\n──────────────────────\n*📌 ${cleanHeading}*`);
-      notebookLines.push(`──────────────────────`);
-    } else if (isSubPoint(line)) {
-      const strippedPoint = safeLine
+      activeHeading = line.replace(/[:\-–—]+$/, "").trim() || "Topic";
+      out += `\n${activeHeading} - Definition\n`;
+      startedSection = true;
+      continue;
+    }
+
+    if (!startedSection) {
+      out += `\n${activeHeading} - Definition\n`;
+      startedSection = true;
+    }
+
+    if (isSubPoint(line)) {
+      const pointBody = line
         .replace(/^(\d+[\).\s-]|[a-dA-D]\)\s*|[-–•●▪◦]\s*)+/, "")
         .trim();
-      notebookLines.push(`✍️ • ${strippedPoint || safeLine}`);
-      notebookLines.push(`┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄`);
+      out += `• ${pointBody || line}\n`;
+    } else if (line.length > 190) {
+      const sentences = line.match(/[^.!?]+[.!?]+(\s|$)/g) || [line];
+      for (const s of sentences) {
+        const part = s.trim();
+        if (!part) continue;
+        if (part.length <= 135) {
+          out += `• ${part}\n`;
+        } else {
+          out += `${part}\n`;
+        }
+      }
     } else {
-      notebookLines.push(`✍️ ${safeLine}`);
-      notebookLines.push(`┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄`);
+      out += `${line}\n`;
     }
   }
 
-  const header = `📓 *HAND WRITTEN NOTEBOOK — ${unitLabel}*\n━━━━━━━━━━━━━━━━━━━━━━\n`;
-  const footer = `\n━━━━━━━━━━━━━━━━━━━━━━\n📝 *Exam Tip:* Heading aur points ko saaf line-by-line likhein.`;
+  return out.trim();
+}
 
+function buildHandwrittenMessages(rawText, title) {
+  const structured = buildStructuredNotesText(rawText, title);
+  const lines = structured.split(/\r?\n/).filter((l) => l.trim().length > 0);
+
+  const formattedLines = lines.map((line) => {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("Chapter / Unit:")) {
+      return `📘 *${escapeMarkdownText(trimmed)}*`;
+    }
+    if (trimmed === "Main Heading") {
+      return `\n━━━━━━━━━━━━━━━━━━━━━━\n📌 *${escapeMarkdownText(trimmed)}*`;
+    }
+    if (trimmed.endsWith(" - Definition")) {
+      return `\n*🔹 ${escapeMarkdownText(trimmed)}*`;
+    }
+    if (trimmed.startsWith("• ")) {
+      return `✍️ ${escapeMarkdownText(trimmed)}`;
+    }
+    return `📖 ${escapeMarkdownText(trimmed)}`;
+  });
+
+  const footer = `\n━━━━━━━━━━━━━━━━━━━━━━\n📝 *Exam Tip:* Definitions aur points ko clear headings ke saath yaad rakhein.`;
   const maxChunkLen = 3350;
   const chunks = [];
-  let current = header;
+  let current = "";
 
-  for (const entry of notebookLines) {
+  for (const entry of formattedLines) {
     const block = `${entry}\n`;
     if ((current + block).length > maxChunkLen) {
       chunks.push(`${current.trimEnd()}${footer}`);
-      current = `${header}${block}`;
+      current = `${block}`;
     } else {
       current += block;
     }
@@ -633,11 +699,11 @@ function getMainMenuMarkup(user) {
 📚 <b>Your Complete Study Assistant</b>
 
 ➖ 📖 <b>Syllabus</b> (Subject > Units & Topics)
-➖ ✍️ <b>Hand Written Notes</b> (Notebook Style Text)
+➖ ✍️ <b>Hand Written Notes</b> (Structured Notebook Format)
 ➖ 📝 <b>PYQ Question</b> (MCQ / Short / Long — 5-5 Set + Answers)
 ➖ 🎯 <b>Mock Test</b> (20 Questions Interactive Set)
 ➖ 🤖 <b>AI Assistant</b> (PDF Search)
-➖ 🪪 <b>Admit Cards Link & 📊 Result Link</b>
+➖ 🔗 <b>Links</b> (Admit Card & Result)
 
 ──────────────────────
 👤 <b>User ID:</b> ${user.id}
@@ -648,11 +714,13 @@ function getMainMenuMarkup(user) {
 
   const inline_keyboard = MAIN_MENU_BUTTONS.map((row) =>
     row.map((label) => {
-      const idx = ALLOWED_STUDY_TYPES.includes(label)
-        ? ALLOWED_STUDY_TYPES.indexOf(label)
-        : label === "Admit Cards Link"
-          ? 100
-          : 101;
+      if (label === "🔗 Links") {
+        return {
+          text: label,
+          callback_data: "links_menu"
+        };
+      }
+      const idx = ALLOWED_STUDY_TYPES.indexOf(label);
       return {
         text: label,
         callback_data: `type_${idx}`
@@ -865,8 +933,9 @@ app.post('/webhook', async (req, res) => {
           }
         }
 
+        const pdfTitle = flow.title || doc.file_name || "Unit PDF";
         const pdfRecord = {
-          title: flow.title || doc.file_name || "Unit PDF",
+          title: pdfTitle,
           fileName: doc.file_name || "document.pdf",
           fileId: doc.file_id,
           category: flow.category,
@@ -896,7 +965,23 @@ app.post('/webhook', async (req, res) => {
           flow.unitName,
           true
         );
-        notesUnit.handwrittenNotes = extractedText;
+
+        notesUnit.pdfs.push({
+          title: pdfTitle,
+          fileName: doc.file_name || "document.pdf",
+          fileId: doc.file_id,
+          uploadedAt: new Date().toISOString()
+        });
+
+        const structuredSection = buildStructuredNotesText(
+          extractedText,
+          `${flow.unitName} — ${pdfTitle}`,
+          flow.subjectName
+        );
+
+        notesUnit.handwrittenNotes = notesUnit.handwrittenNotes
+          ? `${notesUnit.handwrittenNotes}\n\n${structuredSection}`
+          : structuredSection;
 
         const pyqUnit = ensureUnitRecord(
           flow.category,
@@ -907,11 +992,26 @@ app.post('/webhook', async (req, res) => {
           flow.unitName,
           true
         );
-        pyqUnit.pyqStructured = generated.pyqStructured;
+        pyqUnit.pdfs.push({
+          title: pdfTitle,
+          fileName: doc.file_name || "document.pdf",
+          fileId: doc.file_id,
+          uploadedAt: new Date().toISOString()
+        });
+
+        const existingMcq = pyqUnit.pyqStructured.mcq || [];
+        const existingShort = pyqUnit.pyqStructured.short || [];
+        const existingLong = pyqUnit.pyqStructured.long || [];
+
+        pyqUnit.pyqStructured = {
+          mcq: [...existingMcq, ...generated.pyqStructured.mcq],
+          short: [...existingShort, ...generated.pyqStructured.short],
+          long: [...existingLong, ...generated.pyqStructured.long]
+        };
         pyqUnit.pyqQuestions = [
-          ...generated.pyqStructured.mcq.map((q) => `${q.question} — ${q.answer}`),
-          ...generated.pyqStructured.short.map((q) => `${q.question} — ${q.answer}`),
-          ...generated.pyqStructured.long.map((q) => `${q.question} — ${q.answer}`)
+          ...pyqUnit.pyqStructured.mcq.map((q) => `${q.question} — ${q.answer}`),
+          ...pyqUnit.pyqStructured.short.map((q) => `${q.question} — ${q.answer}`),
+          ...pyqUnit.pyqStructured.long.map((q) => `${q.question} — ${q.answer}`)
         ];
 
         const mockUnit = ensureUnitRecord(
@@ -923,31 +1023,39 @@ app.post('/webhook', async (req, res) => {
           flow.unitName,
           true
         );
-        mockUnit.mockMcqSet = generated.mockMcqSet;
-        mockUnit.mockQuestions = generated.mockMcqSet.map((q) => q.question);
+        mockUnit.pdfs.push({
+          title: pdfTitle,
+          fileName: doc.file_name || "document.pdf",
+          fileId: doc.file_id,
+          uploadedAt: new Date().toISOString()
+        });
 
-        user.adminUploadFlow = null;
+        const combinedMock = [...(mockUnit.mockMcqSet || []), ...generated.mockMcqSet].slice(0, 20);
+        mockUnit.mockMcqSet = combinedMock;
+        mockUnit.mockQuestions = combinedMock.map((q) => q.question);
+
         persistAll();
 
         await axios.post(`${TELEGRAM_API}/sendMessage`, {
           chat_id: chatId,
           text:
-`✅ <b>Single PDF Processed & Generated All Sections!</b>
+`✅ <b>PDF Added (${notesUnit.pdfs.length} Total PDFs in Unit)!</b>
 
-📄 <b>Title:</b> <code>${escapeHtml(pdfRecord.title)}</code>
+📄 <b>Title:</b> <code>${escapeHtml(pdfTitle)}</code>
 📘 <b>Subject:</b> ${escapeHtml(flow.subjectName)}
 📂 <b>Unit:</b> ${escapeHtml(flow.unitName)}
 📝 <b>Extracted Text:</b> ${extractedText.length} chars
 
-<b>Generated Automatically:</b>
-✍️ Hand Written Notes: Ready
-📝 PYQ Questions: ${generated.pyqStructured.mcq.length} MCQ | ${generated.pyqStructured.short.length} Short | ${generated.pyqStructured.long.length} Long
-🎯 Mock Test: ${generated.mockMcqSet.length} Questions Set Ready`,
+<b>Updated Automatically:</b>
+✍️ Hand Written Notes: Appended (Structured Format)
+📝 PYQ Questions: ${pyqUnit.pyqStructured.mcq.length} MCQ | ${pyqUnit.pyqStructured.short.length} Short | ${pyqUnit.pyqStructured.long.length} Long
+🎯 Mock Test: ${mockUnit.mockMcqSet.length} Questions Set Ready
+
+<i>Aap is unit mein aur PDFs bhi bhej sakte hain, ya naye <code>/add_pdf</code> command se kisi aur unit/course mein daal sakte hain.</i>`,
           parse_mode: "HTML"
         });
         return;
       }
-
       if (text.startsWith('/start')) {
         user.selectedType = null;
         user.selectedCategory = null;
@@ -964,6 +1072,208 @@ app.post('/webhook', async (req, res) => {
           text: menu.resText,
           parse_mode: "HTML",
           reply_markup: menu.reply_markup
+        });
+      }
+      else if (text.startsWith('/add_course')) {
+        if (!isAdmin(from.id)) return;
+        const parts = text.replace('/add_course', '').trim().split('|').map((s) => s.trim());
+        if (parts.length < 2 || !parts[0] || !parts[1]) {
+          await axios.post(`${TELEGRAM_API}/sendMessage`, {
+            chat_id: chatId,
+            text: "⚠️ Use: <code>/add_course Category | CourseName</code>\nExample: <code>/add_course Pharmacy | B.Pharm Practice</code>",
+            parse_mode: "HTML"
+          });
+          return;
+        }
+        const [category, courseName] = parts;
+        if (!CATEGORIES[category]) {
+          CATEGORIES[category] = [];
+        }
+        if (!CATEGORIES[category].includes(courseName)) {
+          CATEGORIES[category].push(courseName);
+        }
+        if (!studyDb.materials[category]) studyDb.materials[category] = {};
+        if (!studyDb.materials[category][courseName]) studyDb.materials[category][courseName] = {};
+        persistAll();
+
+        await axios.post(`${TELEGRAM_API}/sendMessage`, {
+          chat_id: chatId,
+          text: `✅ <b>Course Added:</b> <code>${escapeHtml(courseName)}</code> in <b>${escapeHtml(category)}</b>`,
+          parse_mode: "HTML"
+        });
+      }
+      else if (text.startsWith('/del_course')) {
+        if (!isAdmin(from.id)) return;
+        const parts = text.replace('/del_course', '').trim().split('|').map((s) => s.trim());
+        if (parts.length < 2 || !parts[0] || !parts[1]) {
+          await axios.post(`${TELEGRAM_API}/sendMessage`, {
+            chat_id: chatId,
+            text: "⚠️ Use: <code>/del_course Category | CourseName</code>\nExample: <code>/del_course Pharmacy | D.Pharma</code>",
+            parse_mode: "HTML"
+          });
+          return;
+        }
+        const [category, courseName] = parts;
+        if (Array.isArray(CATEGORIES[category])) {
+          CATEGORIES[category] = CATEGORIES[category].filter((c) => c !== courseName);
+        }
+        if (studyDb.materials[category] && studyDb.materials[category][courseName]) {
+          delete studyDb.materials[category][courseName];
+        }
+        persistAll();
+
+        await axios.post(`${TELEGRAM_API}/sendMessage`, {
+          chat_id: chatId,
+          text: `🗑️ <b>Course Removed:</b> <code>${escapeHtml(courseName)}</code> from <b>${escapeHtml(category)}</b>`,
+          parse_mode: "HTML"
+        });
+      }
+      else if (text.startsWith('/list_pdfs')) {
+        if (!isAdmin(from.id)) return;
+        const parts = text.replace('/list_pdfs', '').trim().split('|').map((s) => s.trim());
+        if (parts.length < 6 || parts.some((p) => !p)) {
+          await axios.post(`${TELEGRAM_API}/sendMessage`, {
+            chat_id: chatId,
+            text: "⚠️ Use: <code>/list_pdfs Category | Course | Year (or -) | Semester | Subject | Unit</code>",
+            parse_mode: "HTML"
+          });
+          return;
+        }
+        const [category, course, yearRaw, semester, subjectName, unitName] = parts;
+        const yearName = (!yearRaw || yearRaw === "-" || yearRaw.toLowerCase() === "none") ? null : yearRaw;
+        const periodKey = buildPeriodStorageKey(yearName, semester);
+
+        const unitRec =
+          ensureUnitRecord(category, course, periodKey, "Hand Written Notes", subjectName, unitName, false) ||
+          ensureUnitRecord(category, course, periodKey, "PYQ Question", subjectName, unitName, false) ||
+          ensureUnitRecord(category, course, periodKey, "Mock Test", subjectName, unitName, false);
+
+        const unitPdfs = unitRec && Array.isArray(unitRec.pdfs) ? unitRec.pdfs : [];
+        const dbMatches = (studyDb.uploadedPdfs || []).filter(
+          (p) =>
+            p.category === category &&
+            p.course === course &&
+            p.periodKey === periodKey &&
+            p.subjectName === subjectName &&
+            p.unitName === unitName
+        );
+
+        const listToShow = unitPdfs.length > 0 ? unitPdfs : dbMatches;
+        if (listToShow.length === 0) {
+          await axios.post(`${TELEGRAM_API}/sendMessage`, {
+            chat_id: chatId,
+            text: `📂 Is unit mein koi PDF nahi mili:\n<b>${escapeHtml(course)} > ${escapeHtml(periodKey)} > ${escapeHtml(subjectName)} > ${escapeHtml(unitName)}</b>`,
+            parse_mode: "HTML"
+          });
+          return;
+        }
+
+        const lines = listToShow.map(
+          (pdf, i) => `${i + 1}. <b>${escapeHtml(pdf.title || pdf.fileName || "PDF")}</b> (<code>${escapeHtml(pdf.fileName || "file.pdf")}</code>)`
+        );
+
+        await axios.post(`${TELEGRAM_API}/sendMessage`, {
+          chat_id: chatId,
+          text:
+`📄 <b>PDFs IN UNIT (${listToShow.length})</b>
+🎓 <b>Course:</b> ${escapeHtml(course)} (${escapeHtml(periodKey)})
+📘 <b>Subject:</b> ${escapeHtml(subjectName)}
+📂 <b>Unit:</b> ${escapeHtml(unitName)}
+
+${lines.join("\n")}`,
+          parse_mode: "HTML"
+        });
+      }
+      else if (text.startsWith('/add_link')) {
+        if (!isAdmin(from.id)) return;
+        const parts = text.replace('/add_link', '').trim().split('|').map((s) => s.trim());
+        if (parts.length < 5 || parts.some((p) => !p)) {
+          await axios.post(`${TELEGRAM_API}/sendMessage`, {
+            chat_id: chatId,
+            text:
+`⚠️ Use:
+<code>/add_link Admit Card | Pharmacy | 1st Year | Semester 1 | https://example.com</code>
+or
+<code>/add_link Result | Pharmacy | 1st Year | Semester 1 | https://example.com</code>`,
+            parse_mode: "HTML"
+          });
+          return;
+        }
+        const [typeRaw, pharmacyOrCategory, yearVal, semesterVal, ...urlParts] = parts;
+        const urlVal = urlParts.join(" | ").trim();
+        const typeLower = typeRaw.toLowerCase();
+        const linkType = typeLower.includes("result")
+          ? "Result"
+          : typeLower.includes("admit")
+            ? "Admit Card"
+            : null;
+
+        if (!linkType) {
+          await axios.post(`${TELEGRAM_API}/sendMessage`, {
+            chat_id: chatId,
+            text: "⚠️ Type mein <b>Admit Card</b> ya <b>Result</b> likhein.",
+            parse_mode: "HTML"
+          });
+          return;
+        }
+
+        ensureDbDefaults();
+        studyDb.examLinks[linkType].push({
+          category: pharmacyOrCategory,
+          year: yearVal,
+          semester: semesterVal,
+          url: urlVal
+        });
+        persistAll();
+
+        await axios.post(`${TELEGRAM_API}/sendMessage`, {
+          chat_id: chatId,
+          text:
+`✅ <b>${escapeHtml(linkType)} Link Added!</b>
+${escapeHtml(pharmacyOrCategory)}
+${escapeHtml(yearVal)}
+${escapeHtml(semesterVal)}
+${escapeHtml(urlVal)}`,
+          parse_mode: "HTML"
+        });
+      }
+      else if (text.startsWith('/del_link')) {
+        if (!isAdmin(from.id)) return;
+        const parts = text.replace('/del_link', '').trim().split('|').map((s) => s.trim());
+        if (parts.length < 2 || !parts[0] || !parts[1]) {
+          await axios.post(`${TELEGRAM_API}/sendMessage`, {
+            chat_id: chatId,
+            text: "⚠️ Use: <code>/del_link Admit Card | 1</code> or <code>/del_link Result | 1</code>",
+            parse_mode: "HTML"
+          });
+          return;
+        }
+        const [typeRaw, indexStr] = parts;
+        const typeLower = typeRaw.toLowerCase();
+        const linkType = typeLower.includes("result")
+          ? "Result"
+          : typeLower.includes("admit")
+            ? "Admit Card"
+            : null;
+        const idx = parseInt(indexStr, 10) - 1;
+
+        ensureDbDefaults();
+        const arr = linkType ? studyDb.examLinks[linkType] : null;
+        if (!arr || isNaN(idx) || idx < 0 || idx >= arr.length) {
+          await axios.post(`${TELEGRAM_API}/sendMessage`, {
+            chat_id: chatId,
+            text: "⚠️ Valid link type aur serial number (1, 2, ...) dein.",
+            parse_mode: "HTML"
+          });
+          return;
+        }
+        const removed = arr.splice(idx, 1)[0];
+        persistAll();
+
+        await axios.post(`${TELEGRAM_API}/sendMessage`, {
+          chat_id: chatId,
+          text: `🗑️ <b>${escapeHtml(linkType)} Link Removed:</b> ${escapeHtml(removed.category)} - ${escapeHtml(removed.year)} - ${escapeHtml(removed.semester)}`,
+          parse_mode: "HTML"
         });
       }
       else if (text.startsWith('/add_topic')) {
@@ -1011,7 +1321,7 @@ app.post('/webhook', async (req, res) => {
         const title = titleParts.join(" | ");
 
         user.adminUploadFlow = {
-          step: "WAITING_SINGLE_PDF",
+          step: "WAITING_MULTI_PDF",
           category,
           course,
           periodKey,
@@ -1023,7 +1333,7 @@ app.post('/webhook', async (req, res) => {
 
         await axios.post(`${TELEGRAM_API}/sendMessage`, {
           chat_id: chatId,
-          text: `📎 Ek baar PDF bhejein (<b>${escapeHtml(title)}</b>). Isse Hand Written Notes, PYQ Questions aur Mock Test automatically ban jayenge.`,
+          text: `📎 PDF bhejein (<b>${escapeHtml(title)}</b>). Aap is unit mein jitni chahein utni PDFs ek-ek karke bhej sakte hain; har PDF se Hand Written Notes, PYQ Questions aur Mock Test update honge.`,
           parse_mode: "HTML"
         });
       }
@@ -1155,14 +1465,66 @@ app.post('/webhook', async (req, res) => {
           reply_markup: menu.reply_markup
         });
       }
+      else if (data === "links_menu") {
+        await deletePrevMessage();
+        await axios.post(`${TELEGRAM_API}/sendMessage`, {
+          chat_id: chatId,
+          text: "🔗 <b>LINKS MENU</b>\n\nKya dekhna chahte hain?",
+          parse_mode: "HTML",
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "🪪 Admit Card", callback_data: "linkcat_Admit Card" }],
+              [{ text: "📊 Result", callback_data: "linkcat_Result" }],
+              [{ text: "🔙 Main Menu", callback_data: "main_menu" }]
+            ]
+          }
+        });
+      }
+      else if (data.startsWith("linkcat_")) {
+        ensureDbDefaults();
+        const linkType = data.replace("linkcat_", "");
+        const items = studyDb.examLinks[linkType] || [];
+
+        await deletePrevMessage();
+
+        if (items.length === 0) {
+          await axios.post(`${TELEGRAM_API}/sendMessage`, {
+            chat_id: chatId,
+            text: `🔗 <b>${escapeHtml(linkType)}</b>\n\nAbhi koi link add nahi kiya gaya hai.`,
+            parse_mode: "HTML",
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: "🔙 Back to Links", callback_data: "links_menu" }],
+                [{ text: "🔙 Main Menu", callback_data: "main_menu" }]
+              ]
+            }
+          });
+        } else {
+          const blocks = items.map((item, i) =>
+`<b>${i + 1}.</b>
+<b>${escapeHtml(item.category)}</b>
+<b>${escapeHtml(item.year)}</b>
+<b>${escapeHtml(item.semester)}</b>
+<a href="${item.url}">${escapeHtml(item.url)}</a>`
+          );
+
+          await axios.post(`${TELEGRAM_API}/sendMessage`, {
+            chat_id: chatId,
+            text: `🔗 <b>${escapeHtml(linkType)}</b>\n\n${blocks.join("\n\n──────────────────────\n\n")}`,
+            parse_mode: "HTML",
+            disable_web_page_preview: true,
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: "🔙 Back to Links", callback_data: "links_menu" }],
+                [{ text: "🔙 Main Menu", callback_data: "main_menu" }]
+              ]
+            }
+          });
+        }
+      }
       else if (data.startsWith("type_")) {
         const idx = parseInt(data.replace("type_", ""), 10);
-        const typeName =
-          idx === 100
-            ? "Admit Cards Link"
-            : idx === 101
-              ? "Result Link"
-              : ALLOWED_STUDY_TYPES[idx];
+        const typeName = ALLOWED_STUDY_TYPES[idx];
 
         if (!typeName) return;
         user.selectedType = typeName;
@@ -1203,7 +1565,7 @@ app.post('/webhook', async (req, res) => {
         const cIdx = parseInt(data.replace("cat_", ""), 10);
         const catList = getCategoryList();
         const catName = catList[cIdx];
-        const courses = CATEGORIES[catName] || [];
+        const courses = getCoursesForCategory(catName);
         user.selectedCategory = catName;
         persistAll();
 
@@ -1225,7 +1587,7 @@ app.post('/webhook', async (req, res) => {
         const cIdx = parseInt(cIdxStr, 10);
         const sIdx = parseInt(sIdxStr, 10);
         const catName = getCategoryList()[cIdx];
-        const courseName = (CATEGORIES[catName] || [])[sIdx];
+        const courseName = getCoursesForCategory(catName)[sIdx];
         const studyType = user.selectedType || "Syllabus";
 
         user.selectedCategory = catName;
@@ -1233,32 +1595,6 @@ app.post('/webhook', async (req, res) => {
         persistAll();
 
         await deletePrevMessage();
-
-        if (studyType === "Admit Cards Link" || studyType === "Result Link") {
-          const key = `${catName}::${courseName}`;
-          const list =
-            studyType === "Admit Cards Link"
-              ? (studyDb.links.admitCards[key] || [])
-              : (studyDb.links.results[key] || []);
-          const body =
-            list.length === 0
-              ? `Abhi is course ka ${studyType} update nahi hua hai.`
-              : list.map((l, i) => `${i + 1}. <a href="${l.url}">${l.label}</a>`).join("\n");
-
-          await axios.post(`${TELEGRAM_API}/sendMessage`, {
-            chat_id: chatId,
-            text: `🔗 <b>${escapeHtml(studyType)} — ${escapeHtml(courseName)}</b>\n\n${body}`,
-            parse_mode: "HTML",
-            disable_web_page_preview: true,
-            reply_markup: {
-              inline_keyboard: [
-                [{ text: "📞 Support", url: SUPPORT_CHANNEL }],
-                [{ text: "🔙 Main Menu", callback_data: "main_menu" }]
-              ]
-            }
-          });
-          return;
-        }
 
         const years = getYearsForCourse(catName, courseName);
         if (years.length > 0) {
@@ -1296,7 +1632,7 @@ app.post('/webhook', async (req, res) => {
         const yIdx = parseInt(yIdxStr, 10);
 
         const catName = getCategoryList()[cIdx];
-        const courseName = CATEGORIES[catName][sIdx];
+        const courseName = getCoursesForCategory(catName)[sIdx];
         const yearName = getYearsForCourse(catName, courseName)[yIdx];
         const studyType = user.selectedType || "Syllabus";
 
@@ -1325,7 +1661,7 @@ app.post('/webhook', async (req, res) => {
         const semIdx = parseInt(semIdxStr, 10);
 
         const catName = getCategoryList()[cIdx];
-        const courseName = CATEGORIES[catName][sIdx];
+        const courseName = getCoursesForCategory(catName)[sIdx];
         const yearName = yPart === "n" ? null : getYearsForCourse(catName, courseName)[parseInt(yPart, 10)];
         const semName = getSemestersForCourse(catName, courseName, yearName)[semIdx];
         const studyType = user.selectedType || "Syllabus";
@@ -1373,7 +1709,7 @@ app.post('/webhook', async (req, res) => {
         const sbIdx = parseInt(sbIdxStr, 10);
 
         const catName = getCategoryList()[cIdx];
-        const courseName = CATEGORIES[catName][sIdx];
+        const courseName = getCoursesForCategory(catName)[sIdx];
         const yearName = yPart === "n" ? null : getYearsForCourse(catName, courseName)[parseInt(yPart, 10)];
         const semName = getSemestersForCourse(catName, courseName, yearName)[semIdx];
         const studyType = ALLOWED_STUDY_TYPES[tIdx];
@@ -1450,7 +1786,7 @@ app.post('/webhook', async (req, res) => {
         const uIdx = parseInt(uIdxStr, 10);
 
         const catName = getCategoryList()[cIdx];
-        const courseName = CATEGORIES[catName][sIdx];
+        const courseName = getCoursesForCategory(catName)[sIdx];
         const yearName = yPart === "n" ? null : getYearsForCourse(catName, courseName)[parseInt(yPart, 10)];
         const semName = getSemestersForCourse(catName, courseName, yearName)[semIdx];
         const studyType = ALLOWED_STUDY_TYPES[tIdx];
@@ -1465,7 +1801,7 @@ app.post('/webhook', async (req, res) => {
 
         if (studyType === "Hand Written Notes") {
           const rawNotes = (unitRec && unitRec.handwrittenNotes) || "";
-          const noteMessages = buildHandwrittenMessages(rawNotes, `${subjectName} — ${unitName}`);
+          const noteMessages = buildHandwrittenMessages(rawNotes, `${unitName} (${subjectName})`);
 
           for (let i = 0; i < noteMessages.length; i++) {
             const isLast = i === noteMessages.length - 1;
@@ -1553,7 +1889,7 @@ Question type chunein:`,
         const uIdx = parseInt(uIdxStr, 10);
 
         const catName = getCategoryList()[cIdx];
-        const courseName = CATEGORIES[catName][sIdx];
+        const courseName = getCoursesForCategory(catName)[sIdx];
         const yearName = yPart === "n" ? null : getYearsForCourse(catName, courseName)[parseInt(yPart, 10)];
         const semName = getSemestersForCourse(catName, courseName, yearName)[semIdx];
         const studyType = ALLOWED_STUDY_TYPES[tIdx];
