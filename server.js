@@ -114,7 +114,6 @@ const DEFAULT_DIRECT_SEMESTERS_BY_COURSE = {
   "Agniveer SSR": ["Stage 1"],
   "Agniveer MR": ["Stage 1"]
 };
-
 let studyDb = {
   materials: {},
   uploadedPdfs: [],
@@ -297,7 +296,6 @@ function ensureUnitRecord(category, course, periodKey, studyType, subjectName, u
   }
   return bucket.subjects[subjectName].units[unitName];
 }
-
 function escapeMarkdownText(str) {
   return String(str || "").replace(/([_*`\[])/g, "\\$1");
 }
@@ -341,7 +339,6 @@ function cleanPdfLine(rawLine) {
   return s;
 }
 
-// Notebook / Lined-Page Style Handwritten Notes
 function buildHandwrittenMessages(rawText, title) {
   const rawLines = (rawText || "").split(/\r?\n/);
   const cleanedLines = rawLines.map(cleanPdfLine).filter(Boolean);
@@ -403,7 +400,6 @@ function buildHandwrittenMessages(rawText, title) {
   return chunks;
 }
 
-// Auto-generate PYQ (MCQ, Short, Long with Answers) + 20-Question Mock MCQ Set from PDF text
 function generateStudyMaterialsFromPdfText(rawText, subjectName, unitName) {
   const cleanedLines = (rawText || "")
     .split(/\r?\n/)
@@ -434,7 +430,6 @@ function generateStudyMaterialsFromPdfText(rawText, subjectName, unitName) {
     "It is a non-therapeutic laboratory solvent only."
   ];
 
-  // Build up to 25 PYQ MCQs & 20 Mock MCQs
   const totalMcqTarget = Math.min(25, Math.max(5, factPool.length));
   for (let i = 0; i < totalMcqTarget; i++) {
     const fact = factPool[i % factPool.length];
@@ -460,7 +455,6 @@ function generateStudyMaterialsFromPdfText(rawText, subjectName, unitName) {
     }
   }
 
-  // Ensure Mock MCQ Set has 20 questions even if PDF text was short
   let padIdx = 1;
   while (mockMcqSet.length < 20) {
     const tName = topicPool[(mockMcqSet.length) % topicPool.length];
@@ -480,7 +474,6 @@ function generateStudyMaterialsFromPdfText(rawText, subjectName, unitName) {
     padIdx++;
   }
 
-  // Build PYQ Short Questions + Answers
   const shortCount = Math.min(15, Math.max(5, factPool.length));
   for (let i = 0; i < shortCount; i++) {
     const fact = factPool[i % factPool.length];
@@ -491,7 +484,6 @@ function generateStudyMaterialsFromPdfText(rawText, subjectName, unitName) {
     });
   }
 
-  // Build PYQ Long Questions + Answers
   const longCount = Math.min(10, Math.max(5, topicPool.length + 2));
   for (let i = 0; i < longCount; i++) {
     const h = topicPool[i % topicPool.length];
@@ -752,7 +744,6 @@ app.post('/webhook', async (req, res) => {
       const text = (update.message.text || "").trim();
       const user = getUser(from.id, from.first_name);
 
-      // Single PDF upload by Admin -> generates Hand Written Notes, PYQ (MCQ/Short/Long) & Mock Test
       if (update.message.document) {
         if (!isAdmin(from.id)) {
           await axios.post(`${TELEGRAM_API}/sendMessage`, {
@@ -827,7 +818,6 @@ app.post('/webhook', async (req, res) => {
           flow.unitName
         );
 
-        // 1) Hand Written Notes
         const notesUnit = ensureUnitRecord(
           flow.category,
           flow.course,
@@ -839,7 +829,6 @@ app.post('/webhook', async (req, res) => {
         );
         notesUnit.handwrittenNotes = extractedText;
 
-        // 2) PYQ Question (MCQ, Short, Long + Answers)
         const pyqUnit = ensureUnitRecord(
           flow.category,
           flow.course,
@@ -856,7 +845,6 @@ app.post('/webhook', async (req, res) => {
           ...generated.pyqStructured.long.map((q) => `${q.question} — ${q.answer}`)
         ];
 
-        // 3) Mock Test (20 MCQ Set)
         const mockUnit = ensureUnitRecord(
           flow.category,
           flow.course,
@@ -970,7 +958,6 @@ app.post('/webhook', async (req, res) => {
           parse_mode: "HTML"
         });
       }
-      // Admin: Update Course Name
       else if (text.startsWith('/update_course')) {
         if (!isAdmin(from.id)) return;
         const parts = text.replace('/update_course', '').trim().split('|').map((s) => s.trim());
@@ -998,7 +985,6 @@ app.post('/webhook', async (req, res) => {
           parse_mode: "HTML"
         });
       }
-      // Admin: Update Unit Name
       else if (text.startsWith('/update_unit')) {
         if (!isAdmin(from.id)) return;
         const parts = text.replace('/update_unit', '').trim().split('|').map((s) => s.trim());
@@ -1033,7 +1019,6 @@ app.post('/webhook', async (req, res) => {
           });
         }
       }
-      // Admin: Delete Unit
       else if (text.startsWith('/del_unit')) {
         if (!isAdmin(from.id)) return;
         const parts = text.replace('/del_unit', '').trim().split('|').map((s) => s.trim());
