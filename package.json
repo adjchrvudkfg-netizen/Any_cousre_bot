@@ -1,13 +1,13 @@
 {
   "name": "study-material-bot",
   "version": "1.0.0",
-  "description": "Telegram Study Material Bot with Category, Stream, Unit, Chapter & Admin PDF Management",
+  "description": "Telegram Study Material Bot",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "dotenv": "^16.4.5",
-    "node-telegram-bot-api": "^0.66.0"
+    "axios": "^1.7.9",
+    "express": "^4.21.2"
   }
 }
