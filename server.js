@@ -215,7 +215,34 @@ function getYearsForCourse(category, course) {
 
 function getSemestersForCourse(category, course, yearName = null) {
   const key = yearName
-    ? `${category}::${course}::${yearName}` : `${category}::${course}`;  let baseSems = []; if ( yearName && DEFAULT_SEMESTERS_BY_YEAR[course] && DEFAULT_SEMESTERS_BY_YEAR[course][yearName] ) { baseSems = [...DEFAULT_SEMESTERS_BY_YEAR[course][yearName]]; } else if (!yearName && DEFAULT_DIRECT_SEMESTERS_BY_COURSE[course]) { baseSems = [...DEFAULT_DIRECT_SEMESTERS_BY_COURSE[course]]; } else if (!yearName && !DEFAULT_YEARS_BY_COURSE[course]) { baseSems = ["Semester 1", "Semester 2"]; }  const extraSems = studyDb.customSemesters[key] \vert{}\vert{} []; const merged = [...baseSems];  if (!yearName && studyDb.materials[category] && studyDb.materials[category][course]) { for (const semKey of Object.keys(studyDb.materials[category][course])) { if (!semKey.includes(" > ") && !merged.includes(semKey)) { merged.push(semKey); } } } else if (yearName && studyDb.materials[category] && studyDb.materials[category][course]) { const prefix = `${yearName} > `;
+    ? `${category}::${course}::${yearName}`
+    : `${category}::${course}`;
+
+  let baseSems = [];
+  if (
+    yearName &&
+    DEFAULT_SEMESTERS_BY_YEAR[course] &&
+    DEFAULT_SEMESTERS_BY_YEAR[course][yearName]
+  ) {
+    baseSems = [...DEFAULT_SEMESTERS_BY_YEAR[course][yearName]];
+  } else if (!yearName && DEFAULT_DIRECT_SEMESTERS_BY_COURSE[course]) {
+    baseSems = [...DEFAULT_DIRECT_SEMESTERS_BY_COURSE[course]];
+  } else if (!yearName && !DEFAULT_YEARS_BY_COURSE[course]) {
+    baseSems = ["Semester 1", "Semester 2"];
+  }
+
+  const extraSems = studyDb.customSemesters[key] || [];
+  const merged = [...baseSems];
+
+  if (!yearName && studyDb.materials[category] && studyDb.materials[category][course]) {
+    for (const semKey of Object.keys(studyDb.materials[category][course])) {
+      if (!semKey.includes(" > ") && !merged.includes(semKey)) {
+        merged.push(semKey);
+      }
+    }
+  } else if (yearName && studyDb.materials[category] && studyDb.materials[category][course]) {
+    const prefix = `${yearName} > `;
+
     for (const fullKey of Object.keys(studyDb.materials[category][course])) {
       if (fullKey.startsWith(prefix)) {
         const semOnly = fullKey.slice(prefix.length);
