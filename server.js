@@ -113,7 +113,6 @@ const DEFAULT_DIRECT_SEMESTERS_BY_COURSE = {
   "Agniveer SSR": ["Stage 1"],
   "Agniveer MR": ["Stage 1"]
 };
-
 let studyDb = {
   materials: {},
   uploadedPdfs: [],
@@ -188,6 +187,7 @@ function persistAll() {
     console.log("❌ Error persisting database:", e.message);
   }
 }
+
 function getCategoryList() {
   return Object.keys(CATEGORIES);
 }
@@ -278,7 +278,6 @@ function getSemestersForCourse(category, course, yearName = null) {
 
   return merged;
 }
-
 axios.interceptors.request.use((request) => {
   try {
     const data = request.data;
@@ -369,6 +368,7 @@ function ensureUnitRecord(category, course, periodKey, studyType, subjectName, u
       topics: [],
       handwrittenNotes: "",
       pdfs: [],
+      photos: [],
       pyqQuestions: [],
       pyqStructured: {
         mcq: [],
@@ -381,6 +381,9 @@ function ensureUnitRecord(category, course, periodKey, studyType, subjectName, u
   }
   if (!Array.isArray(bucket.subjects[subjectName].units[unitName].pdfs)) {
     bucket.subjects[subjectName].units[unitName].pdfs = [];
+  }
+  if (!Array.isArray(bucket.subjects[subjectName].units[unitName].photos)) {
+    bucket.subjects[subjectName].units[unitName].photos = [];
   }
   if (!bucket.subjects[subjectName].units[unitName].pyqStructured) {
     bucket.subjects[subjectName].units[unitName].pyqStructured = {
@@ -534,7 +537,6 @@ function buildHandwrittenMessages(rawText, title) {
 
   return chunks;
 }
-
 function generateStudyMaterialsFromPdfText(rawText, subjectName, unitName) {
   const cleanedLines = (rawText || "")
     .split(/\r?\n/)
@@ -643,6 +645,7 @@ function generateStudyMaterialsFromPdfText(rawText, subjectName, unitName) {
     mockMcqSet
   };
 }
+
 function detectLanguage(text) {
   if (/[\u0900-\u097F]/.test(text)) return "hindi";
   const lower = text.toLowerCase();
@@ -687,7 +690,6 @@ function buildSmartAiAssistantResponse(query) {
   }
   return `🤖 *AI Assistant*\n🔎 *Topic:* *${escapeMarkdownText(query)}*\n📂 *Source:* ${escapeMarkdownText(sourceLabel)}\n\n${notePreview}`;
 }
-
 function getMainMenuMarkup(user) {
   const roleLabel = isAdmin(user.id) ? "Admin" : "Student";
 
@@ -881,11 +883,66 @@ app.post('/webhook', async (req, res) => {
       const text = (update.message.text || "").trim();
       const user = getUser(from.id, from.first_name);
 
-      if (update.message.document) {
+      if (update.message.document || (Array.isArray(update.message.photo) && update.message.photo.length > 0)) {
         if (!isAdmin(from.id)) {
           await axios.post(`${TELEGRAM_API}/sendMessage`, {
             chat_id: chatId,
-            text: "🚫 <b>Permission Denied:</b> Sirf Admin hi PDF upload kar sakta hai.",
+            text: "🚫 <b>Permission Denied:</b> Sirf Admin hi PDF ya Photo upload kar sakta hai.",
+            parse_mode: "HTML"
+          });
+          return;
+        }
+
+        const flow = user.adminUploadFlow;
+        if (!flow || !flow.category || !flow.course || !flow.periodKey || !flow.subjectName || !flow.unitName) {
+          await axios.post(`${TELEGRAM_API}/sendMessage`, {
+            chat_id: chatId,
+            text: "⚠️ Pehle <code>/add_pdf Category | Course | Year (or -) | Semester | Subject | Unit | Title</code> command bhejein, phir PDF ya Photo bhejein.",
+            parse_mode: "HTML"
+          });
+          return;
+        }
+
+        const itemTitle = flow.title || "Unit Material";
+        const notesUnit = ensureUnitRecord(
+          flow.category,
+          flow.course,
+          flow.periodKey,
+          "Hand Written Notes",
+          flow.subjectName,
+          flow.unitName,
+          true
+        );
+
+        if (Array.isArray(update.message.photo) && update.message.photo.length > 0) {
+          const bestPhoto = update.message.photo[update.message.photo.length - 1];
+          const photoRecord = {
+            title: itemTitle,
+            fileId: bestPhoto.file_id,
+            fileSize: bestPhoto.file_size || 0,
+            category: flow.category,
+            course: flow.course,
+            periodKey: flow.periodKey,
+            subjectName: flow.subjectName,
+            unitName: flow.unitName,
+            addedBy: from.id,
+            addedAt: new Date().toISOString()
+          };
+
+          notesUnit.photos.push(photoRecord);
+          persistAll();
+
+          await axios.post(`${TELEGRAM_API}/sendMessage`, {
+            chat_id: chatId,
+            text:
+`🖼️ <b>Photo Added (${notesUnit.photos.length} Total Photos in Unit)!</b>
+
+📌 <b>Title:</b> <code>${escapeHtml(itemTitle)}</code>
+🎓 <b>Course:</b> ${escapeHtml(flow.course)} (${escapeHtml(flow.periodKey)})
+📘 <b>Subject:</b> ${escapeHtml(flow.subjectName)}
+📂 <b>Unit:</b> ${escapeHtml(flow.unitName)}
+
+<i>Aap is unit mein aur photos ya PDFs bhi bhej sakte hain.</i>`,
             parse_mode: "HTML"
           });
           return;
@@ -899,38 +956,43 @@ app.post('/webhook', async (req, res) => {
         if (!isPdf) {
           await axios.post(`${TELEGRAM_API}/sendMessage`, {
             chat_id: chatId,
-            text: "⚠️ Kripya sirf <b>PDF</b> file bhejein.",
+            text: "⚠️ Kripya <b>PDF</b> file ya <b>Photo</b> bhejein.",
             parse_mode: "HTML"
           });
           return;
         }
 
-        const flow = user.adminUploadFlow;
-        if (!flow || !flow.category || !flow.course || !flow.periodKey || !flow.subjectName || !flow.unitName) {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, {
-            chat_id: chatId,
-            text: "⚠️ Pehle <code>/add_pdf Category | Course | Year (or -) | Semester | Subject | Unit | Title</code> command bhejein, phir PDF file attach karein.",
-            parse_mode: "HTML"
-          });
-          return;
-        }
-
+        const fileSizeBytes = Number(doc.file_size || 0);
+        const fileSizeMb = fileSizeBytes > 0 ? (fileSizeBytes / (1024 * 1024)).toFixed(2) : "Unknown";
         let extractedText = "";
+        let downloadNote = "Text extracted";
+
         if (pdfParse) {
-          try {
-            const fileInfoRes = await axios.get(`${TELEGRAM_API}/getFile`, {
-              params: { file_id: doc.file_id }
-            });
-            const filePath = fileInfoRes.data && fileInfoRes.data.result && fileInfoRes.data.result.file_path;
-            if (filePath) {
-              const fileUrl = `https://api.telegram.org/file/bot${TOKEN}/${filePath}`;
-              const pdfBufferRes = await axios.get(fileUrl, { responseType: "arraybuffer" });
-              const parsedPdf = await pdfParse(Buffer.from(pdfBufferRes.data));
-              extractedText = (parsedPdf.text || "").trim();
+          if (fileSizeBytes > 20 * 1024 * 1024) {
+            downloadNote = `Large file (${fileSizeMb} MB) saved by file_id`;
+          } else {
+            try {
+              const fileInfoRes = await axios.get(`${TELEGRAM_API}/getFile`, {
+                params: { file_id: doc.file_id },
+                timeout: 25000
+              });
+              const filePath = fileInfoRes.data && fileInfoRes.data.result && fileInfoRes.data.result.file_path;
+              if (filePath) {
+                const fileUrl = `https://api.telegram.org/file/bot${TOKEN}/${filePath}`;
+                const pdfBufferRes = await axios.get(fileUrl, {
+                  responseType: "arraybuffer",
+                  timeout: 45000
+                });
+                const parsedPdf = await pdfParse(Buffer.from(pdfBufferRes.data));
+                extractedText = (parsedPdf.text || "").trim();
+              }
+            } catch (pdfErr) {
+              console.log("PDF parse/download error:", pdfErr.message);
+              downloadNote = `Saved by file_id (${fileSizeMb} MB) — large/scanned PDF fallback`;
             }
-          } catch (pdfErr) {
-            console.log("PDF parse error:", pdfErr.message);
           }
+        } else {
+          downloadNote = `Saved by file_id (${fileSizeMb} MB)`;
         }
 
         const pdfTitle = flow.title || doc.file_name || "Unit PDF";
@@ -938,6 +1000,7 @@ app.post('/webhook', async (req, res) => {
           title: pdfTitle,
           fileName: doc.file_name || "document.pdf",
           fileId: doc.file_id,
+          fileSize: fileSizeBytes,
           category: flow.category,
           course: flow.course,
           periodKey: flow.periodKey,
@@ -950,89 +1013,73 @@ app.post('/webhook', async (req, res) => {
 
         studyDb.uploadedPdfs.push(pdfRecord);
 
-        const generated = generateStudyMaterialsFromPdfText(
-          extractedText,
-          flow.subjectName,
-          flow.unitName
-        );
-
-        const notesUnit = ensureUnitRecord(
-          flow.category,
-          flow.course,
-          flow.periodKey,
-          "Hand Written Notes",
-          flow.subjectName,
-          flow.unitName,
-          true
-        );
-
-        notesUnit.pdfs.push({
+        const pdfMeta = {
           title: pdfTitle,
           fileName: doc.file_name || "document.pdf",
           fileId: doc.file_id,
+          fileSizeMb,
           uploadedAt: new Date().toISOString()
-        });
-
-        const structuredSection = buildStructuredNotesText(
-          extractedText,
-          `${flow.unitName} — ${pdfTitle}`,
-          flow.subjectName
-        );
-
-        notesUnit.handwrittenNotes = notesUnit.handwrittenNotes
-          ? `${notesUnit.handwrittenNotes}\n\n${structuredSection}`
-          : structuredSection;
-
-        const pyqUnit = ensureUnitRecord(
-          flow.category,
-          flow.course,
-          flow.periodKey,
-          "PYQ Question",
-          flow.subjectName,
-          flow.unitName,
-          true
-        );
-        pyqUnit.pdfs.push({
-          title: pdfTitle,
-          fileName: doc.file_name || "document.pdf",
-          fileId: doc.file_id,
-          uploadedAt: new Date().toISOString()
-        });
-
-        const existingMcq = pyqUnit.pyqStructured.mcq || [];
-        const existingShort = pyqUnit.pyqStructured.short || [];
-        const existingLong = pyqUnit.pyqStructured.long || [];
-
-        pyqUnit.pyqStructured = {
-          mcq: [...existingMcq, ...generated.pyqStructured.mcq],
-          short: [...existingShort, ...generated.pyqStructured.short],
-          long: [...existingLong, ...generated.pyqStructured.long]
         };
-        pyqUnit.pyqQuestions = [
-          ...pyqUnit.pyqStructured.mcq.map((q) => `${q.question} — ${q.answer}`),
-          ...pyqUnit.pyqStructured.short.map((q) => `${q.question} — ${q.answer}`),
-          ...pyqUnit.pyqStructured.long.map((q) => `${q.question} — ${q.answer}`)
-        ];
 
-        const mockUnit = ensureUnitRecord(
-          flow.category,
-          flow.course,
-          flow.periodKey,
-          "Mock Test",
-          flow.subjectName,
-          flow.unitName,
-          true
-        );
-        mockUnit.pdfs.push({
-          title: pdfTitle,
-          fileName: doc.file_name || "document.pdf",
-          fileId: doc.file_id,
-          uploadedAt: new Date().toISOString()
-        });
+        notesUnit.pdfs.push(pdfMeta);
 
-        const combinedMock = [...(mockUnit.mockMcqSet || []), ...generated.mockMcqSet].slice(0, 20);
-        mockUnit.mockMcqSet = combinedMock;
-        mockUnit.mockQuestions = combinedMock.map((q) => q.question);
+        if (extractedText.length > 0) {
+          const structuredSection = buildStructuredNotesText(
+            extractedText,
+            `${flow.unitName} — ${pdfTitle}`,
+            flow.subjectName
+          );
+          notesUnit.handwrittenNotes = notesUnit.handwrittenNotes
+            ? `${notesUnit.handwrittenNotes}\n\n${structuredSection}`
+            : structuredSection;
+
+          const generated = generateStudyMaterialsFromPdfText(
+            extractedText,
+            flow.subjectName,
+            flow.unitName
+          );
+
+          const pyqUnit = ensureUnitRecord(
+            flow.category,
+            flow.course,
+            flow.periodKey,
+            "PYQ Question",
+            flow.subjectName,
+            flow.unitName,
+            true
+          );
+          pyqUnit.pdfs.push(pdfMeta);
+          pyqUnit.pyqStructured = {
+            mcq: [...(pyqUnit.pyqStructured.mcq || []), ...generated.pyqStructured.mcq],
+            short: [...(pyqUnit.pyqStructured.short || []), ...generated.pyqStructured.short],
+            long: [...(pyqUnit.pyqStructured.long || []), ...generated.pyqStructured.long]
+          };
+          pyqUnit.pyqQuestions = [
+            ...pyqUnit.pyqStructured.mcq.map((q) => `${q.question} — ${q.answer}`),
+            ...pyqUnit.pyqStructured.short.map((q) => `${q.question} — ${q.answer}`),
+            ...pyqUnit.pyqStructured.long.map((q) => `${q.question} — ${q.answer}`)
+          ];
+
+          const mockUnit = ensureUnitRecord(
+            flow.category,
+            flow.course,
+            flow.periodKey,
+            "Mock Test",
+            flow.subjectName,
+            flow.unitName,
+            true
+          );
+          mockUnit.pdfs.push(pdfMeta);
+          const combinedMock = [...(mockUnit.mockMcqSet || []), ...generated.mockMcqSet].slice(0, 20);
+          mockUnit.mockMcqSet = combinedMock;
+          mockUnit.mockQuestions = combinedMock.map((q) => q.question);
+        } else if (!notesUnit.handwrittenNotes) {
+          notesUnit.handwrittenNotes = buildStructuredNotesText(
+            `${pdfTitle} (${doc.file_name || "PDF"}) uploaded (${fileSizeMb} MB).`,
+            flow.unitName,
+            flow.subjectName
+          );
+        }
 
         persistAll();
 
@@ -1042,16 +1089,13 @@ app.post('/webhook', async (req, res) => {
 `✅ <b>PDF Added (${notesUnit.pdfs.length} Total PDFs in Unit)!</b>
 
 📄 <b>Title:</b> <code>${escapeHtml(pdfTitle)}</code>
+📦 <b>Size:</b> ${escapeHtml(String(fileSizeMb))} MB
+🎓 <b>Course:</b> ${escapeHtml(flow.course)} (${escapeHtml(flow.periodKey)})
 📘 <b>Subject:</b> ${escapeHtml(flow.subjectName)}
 📂 <b>Unit:</b> ${escapeHtml(flow.unitName)}
-📝 <b>Extracted Text:</b> ${extractedText.length} chars
+📝 <b>Status:</b> ${escapeHtml(downloadNote)} (${extractedText.length} chars)
 
-<b>Updated Automatically:</b>
-✍️ Hand Written Notes: Appended (Structured Format)
-📝 PYQ Questions: ${pyqUnit.pyqStructured.mcq.length} MCQ | ${pyqUnit.pyqStructured.short.length} Short | ${pyqUnit.pyqStructured.long.length} Long
-🎯 Mock Test: ${mockUnit.mockMcqSet.length} Questions Set Ready
-
-<i>Aap is unit mein aur PDFs bhi bhej sakte hain, ya naye <code>/add_pdf</code> command se kisi aur unit/course mein daal sakte hain.</i>`,
+<i>Aap is unit mein aur PDFs ya photos bhi bhej sakte hain.</i>`,
           parse_mode: "HTML"
         });
         return;
@@ -1074,24 +1118,60 @@ app.post('/webhook', async (req, res) => {
           reply_markup: menu.reply_markup
         });
       }
+      else if (text.startsWith('/add_cat')) {
+        if (!isAdmin(from.id)) return;
+        const catName = text.replace('/add_cat', '').trim();
+        if (!catName) {
+          await axios.post(`${TELEGRAM_API}/sendMessage`, {
+            chat_id: chatId,
+            text: "⚠️ Use: <code>/add_cat CategoryName</code>",
+            parse_mode: "HTML"
+          });
+          return;
+        }
+        if (!CATEGORIES[catName]) CATEGORIES[catName] = [];
+        if (!studyDb.materials[catName]) studyDb.materials[catName] = {};
+        persistAll();
+        await axios.post(`${TELEGRAM_API}/sendMessage`, {
+          chat_id: chatId,
+          text: `✅ <b>Category Added:</b> <code>${escapeHtml(catName)}</code>`,
+          parse_mode: "HTML"
+        });
+      }
+      else if (text.startsWith('/del_cat')) {
+        if (!isAdmin(from.id)) return;
+        const catName = text.replace('/del_cat', '').trim();
+        if (!catName || !CATEGORIES[catName]) {
+          await axios.post(`${TELEGRAM_API}/sendMessage`, {
+            chat_id: chatId,
+            text: "⚠️ Use: <code>/del_cat CategoryName</code>",
+            parse_mode: "HTML"
+          });
+          return;
+        }
+        delete CATEGORIES[catName];
+        if (studyDb.materials[catName]) delete studyDb.materials[catName];
+        persistAll();
+        await axios.post(`${TELEGRAM_API}/sendMessage`, {
+          chat_id: chatId,
+          text: `🗑️ <b>Category Removed:</b> <code>${escapeHtml(catName)}</code>`,
+          parse_mode: "HTML"
+        });
+      }
       else if (text.startsWith('/add_course')) {
         if (!isAdmin(from.id)) return;
         const parts = text.replace('/add_course', '').trim().split('|').map((s) => s.trim());
         if (parts.length < 2 || !parts[0] || !parts[1]) {
           await axios.post(`${TELEGRAM_API}/sendMessage`, {
             chat_id: chatId,
-            text: "⚠️ Use: <code>/add_course Category | CourseName</code>\nExample: <code>/add_course Pharmacy | B.Pharm Practice</code>",
+            text: "⚠️ Use: <code>/add_course Category | CourseName</code>",
             parse_mode: "HTML"
           });
           return;
         }
         const [category, courseName] = parts;
-        if (!CATEGORIES[category]) {
-          CATEGORIES[category] = [];
-        }
-        if (!CATEGORIES[category].includes(courseName)) {
-          CATEGORIES[category].push(courseName);
-        }
+        if (!CATEGORIES[category]) CATEGORIES[category] = [];
+        if (!CATEGORIES[category].includes(courseName)) CATEGORIES[category].push(courseName);
         if (!studyDb.materials[category]) studyDb.materials[category] = {};
         if (!studyDb.materials[category][courseName]) studyDb.materials[category][courseName] = {};
         persistAll();
@@ -1108,7 +1188,7 @@ app.post('/webhook', async (req, res) => {
         if (parts.length < 2 || !parts[0] || !parts[1]) {
           await axios.post(`${TELEGRAM_API}/sendMessage`, {
             chat_id: chatId,
-            text: "⚠️ Use: <code>/del_course Category | CourseName</code>\nExample: <code>/del_course Pharmacy | D.Pharma</code>",
+            text: "⚠️ Use: <code>/del_course Category | CourseName</code>",
             parse_mode: "HTML"
           });
           return;
@@ -1128,6 +1208,76 @@ app.post('/webhook', async (req, res) => {
           parse_mode: "HTML"
         });
       }
+      else if (text.startsWith('/add_year')) {
+        if (!isAdmin(from.id)) return;
+        const parts = text.replace('/add_year', '').trim().split('|').map((s) => s.trim());
+        const [category, course, yearName] = parts;
+        if (!category || !course || !yearName) {
+          await axios.post(`${TELEGRAM_API}/sendMessage`, {
+            chat_id: chatId,
+            text: "⚠️ Use: <code>/add_year Category | Course | YearName</code>",
+            parse_mode: "HTML"
+          });
+          return;
+        }
+        ensureDbDefaults();
+        const key = `${category}::${course}`;
+        if (!Array.isArray(studyDb.customYears[key])) studyDb.customYears[key] = [];
+        if (!studyDb.customYears[key].includes(yearName)) studyDb.customYears[key].push(yearName);
+        persistAll();
+        await axios.post(`${TELEGRAM_API}/sendMessage`, {
+          chat_id: chatId,
+          text: `✅ <b>Year Added:</b> <code>${escapeHtml(yearName)}</code> (${escapeHtml(course)})`,
+          parse_mode: "HTML"
+        });
+      }
+      else if (text.startsWith('/add_sem')) {
+        if (!isAdmin(from.id)) return;
+        const parts = text.replace('/add_sem', '').trim().split('|').map((s) => s.trim());
+        const [category, course, yearRaw, semName] = parts;
+        if (!category || !course || !yearRaw || !semName) {
+          await axios.post(`${TELEGRAM_API}/sendMessage`, {
+            chat_id: chatId,
+            text: "⚠️ Use: <code>/add_sem Category | Course | Year (or -) | SemesterName</code>",
+            parse_mode: "HTML"
+          });
+          return;
+        }
+        ensureDbDefaults();
+        const yearName = (!yearRaw || yearRaw === "-" || yearRaw.toLowerCase() === "none") ? null : yearRaw;
+        const key = yearName ? `${category}::${course}::${yearName}` : `${category}::${course}`;
+        if (!Array.isArray(studyDb.customSemesters[key])) studyDb.customSemesters[key] = [];
+        if (!studyDb.customSemesters[key].includes(semName)) studyDb.customSemesters[key].push(semName);
+        persistAll();
+        await axios.post(`${TELEGRAM_API}/sendMessage`, {
+          chat_id: chatId,
+          text: `✅ <b>Semester Added:</b> <code>${escapeHtml(semName)}</code> (${escapeHtml(course)})`,
+          parse_mode: "HTML"
+        });
+      }
+      else if (text.startsWith('/add_subject')) {
+        if (!isAdmin(from.id)) return;
+        const parts = text.replace('/add_subject', '').trim().split('|').map((s) => s.trim());
+        const [category, course, yearRaw, semester, studyTypeRaw, subjectName] = parts;
+        if (!category || !course || !yearRaw || !semester || !studyTypeRaw || !subjectName) {
+          await axios.post(`${TELEGRAM_API}/sendMessage`, {
+            chat_id: chatId,
+            text: "⚠️ Use: <code>/add_subject Category | Course | Year (or -) | Semester | StudyType | SubjectName</code>",
+            parse_mode: "HTML"
+          });
+          return;
+        }
+        const yearName = (!yearRaw || yearRaw === "-" || yearRaw.toLowerCase() === "none") ? null : yearRaw;
+        const periodKey = buildPeriodStorageKey(yearName, semester);
+        const bucket = getSubjectBucket(category, course, periodKey, studyTypeRaw, true);
+        if (!bucket.subjects[subjectName]) bucket.subjects[subjectName] = { units: {} };
+        persistAll();
+        await axios.post(`${TELEGRAM_API}/sendMessage`, {
+          chat_id: chatId,
+          text: `✅ <b>Subject Added:</b> <code>${escapeHtml(subjectName)}</code> (${escapeHtml(course)} > ${escapeHtml(periodKey)})`,
+          parse_mode: "HTML"
+        });
+      }
       else if (text.startsWith('/list_pdfs')) {
         if (!isAdmin(from.id)) return;
         const parts = text.replace('/list_pdfs', '').trim().split('|').map((s) => s.trim());
@@ -1143,44 +1293,39 @@ app.post('/webhook', async (req, res) => {
         const yearName = (!yearRaw || yearRaw === "-" || yearRaw.toLowerCase() === "none") ? null : yearRaw;
         const periodKey = buildPeriodStorageKey(yearName, semester);
 
-        const unitRec =
-          ensureUnitRecord(category, course, periodKey, "Hand Written Notes", subjectName, unitName, false) ||
-          ensureUnitRecord(category, course, periodKey, "PYQ Question", subjectName, unitName, false) ||
-          ensureUnitRecord(category, course, periodKey, "Mock Test", subjectName, unitName, false);
+        const notesRec = ensureUnitRecord(category, course, periodKey, "Hand Written Notes", subjectName, unitName, false);
+        const unitPdfs = notesRec && Array.isArray(notesRec.pdfs) ? notesRec.pdfs : [];
+        const unitPhotos = notesRec && Array.isArray(notesRec.photos) ? notesRec.photos : [];
 
-        const unitPdfs = unitRec && Array.isArray(unitRec.pdfs) ? unitRec.pdfs : [];
-        const dbMatches = (studyDb.uploadedPdfs || []).filter(
-          (p) =>
-            p.category === category &&
-            p.course === course &&
-            p.periodKey === periodKey &&
-            p.subjectName === subjectName &&
-            p.unitName === unitName
-        );
-
-        const listToShow = unitPdfs.length > 0 ? unitPdfs : dbMatches;
-        if (listToShow.length === 0) {
+        if (unitPdfs.length === 0 && unitPhotos.length === 0) {
           await axios.post(`${TELEGRAM_API}/sendMessage`, {
             chat_id: chatId,
-            text: `📂 Is unit mein koi PDF nahi mili:\n<b>${escapeHtml(course)} > ${escapeHtml(periodKey)} > ${escapeHtml(subjectName)} > ${escapeHtml(unitName)}</b>`,
+            text: `📂 Is unit mein koi PDF ya Photo nahi mili:\n<b>${escapeHtml(course)} > ${escapeHtml(periodKey)} > ${escapeHtml(subjectName)} > ${escapeHtml(unitName)}</b>`,
             parse_mode: "HTML"
           });
           return;
         }
 
-        const lines = listToShow.map(
-          (pdf, i) => `${i + 1}. <b>${escapeHtml(pdf.title || pdf.fileName || "PDF")}</b> (<code>${escapeHtml(pdf.fileName || "file.pdf")}</code>)`
+        const pdfLines = unitPdfs.map(
+          (pdf, i) => `${i + 1}. 📄 <b>${escapeHtml(pdf.title || pdf.fileName || "PDF")}</b> (${escapeHtml(String(pdf.fileSizeMb || "?"))} MB)`
+        );
+        const photoLines = unitPhotos.map(
+          (ph, i) => `${i + 1}. 🖼️ <b>${escapeHtml(ph.title || "Unit Photo")}</b>`
         );
 
         await axios.post(`${TELEGRAM_API}/sendMessage`, {
           chat_id: chatId,
           text:
-`📄 <b>PDFs IN UNIT (${listToShow.length})</b>
+`📂 <b>FILES IN UNIT</b>
 🎓 <b>Course:</b> ${escapeHtml(course)} (${escapeHtml(periodKey)})
 📘 <b>Subject:</b> ${escapeHtml(subjectName)}
 📂 <b>Unit:</b> ${escapeHtml(unitName)}
 
-${lines.join("\n")}`,
+<b>PDFs (${unitPdfs.length}):</b>
+${pdfLines.length ? pdfLines.join("\n") : "• None"}
+
+<b>Photos (${unitPhotos.length}):</b>
+${photoLines.length ? photoLines.join("\n") : "• None"}`,
           parse_mode: "HTML"
         });
       }
@@ -1190,11 +1335,7 @@ ${lines.join("\n")}`,
         if (parts.length < 5 || parts.some((p) => !p)) {
           await axios.post(`${TELEGRAM_API}/sendMessage`, {
             chat_id: chatId,
-            text:
-`⚠️ Use:
-<code>/add_link Admit Card | Pharmacy | 1st Year | Semester 1 | https://example.com</code>
-or
-<code>/add_link Result | Pharmacy | 1st Year | Semester 1 | https://example.com</code>`,
+            text: "⚠️ Use: <code>/add_link Admit Card | Pharmacy | 1st Year | Semester 1 | https://example.com</code>",
             parse_mode: "HTML"
           });
           return;
@@ -1321,7 +1462,7 @@ ${escapeHtml(urlVal)}`,
         const title = titleParts.join(" | ");
 
         user.adminUploadFlow = {
-          step: "WAITING_MULTI_PDF",
+          step: "WAITING_MULTI_PDF_OR_PHOTO",
           category,
           course,
           periodKey,
@@ -1333,7 +1474,7 @@ ${escapeHtml(urlVal)}`,
 
         await axios.post(`${TELEGRAM_API}/sendMessage`, {
           chat_id: chatId,
-          text: `📎 PDF bhejein (<b>${escapeHtml(title)}</b>). Aap is unit mein jitni chahein utni PDFs ek-ek karke bhej sakte hain; har PDF se Hand Written Notes, PYQ Questions aur Mock Test update honge.`,
+          text: `📎 PDF ya Photo bhejein (<b>${escapeHtml(title)}</b>). Aap is unit mein jitni chahein utni PDFs/photos bhej sakte hain.`,
           parse_mode: "HTML"
         });
       }
@@ -1802,16 +1943,31 @@ ${escapeHtml(urlVal)}`,
         if (studyType === "Hand Written Notes") {
           const rawNotes = (unitRec && unitRec.handwrittenNotes) || "";
           const noteMessages = buildHandwrittenMessages(rawNotes, `${unitName} (${subjectName})`);
+          const photosList = Array.isArray(unitRec && unitRec.photos) ? unitRec.photos : [];
 
           for (let i = 0; i < noteMessages.length; i++) {
-            const isLast = i === noteMessages.length - 1;
+            const isLastText = i === noteMessages.length - 1 && photosList.length === 0;
             const partLabel = noteMessages.length > 1 ? `\n📄 *Page ${i + 1} / ${noteMessages.length}*` : "";
 
             await axios.post(`${TELEGRAM_API}/sendMessage`, {
               chat_id: chatId,
               text: `${noteMessages[i]}${partLabel}`,
               parse_mode: "Markdown",
-              reply_markup: isLast
+              reply_markup: isLastText
+                ? { inline_keyboard: [[{ text: "🔙 Main Menu", callback_data: "main_menu" }]] }
+                : undefined
+            });
+          }
+
+          for (let pIdx = 0; pIdx < photosList.length; pIdx++) {
+            const ph = photosList[pIdx];
+            const isLastPhoto = pIdx === photosList.length - 1;
+            await axios.post(`${TELEGRAM_API}/sendPhoto`, {
+              chat_id: chatId,
+              photo: ph.fileId,
+              caption: `🖼️ <b>${escapeHtml(ph.title || unitName || "Unit Photo")}</b> (${pIdx + 1}/${photosList.length})`,
+              parse_mode: "HTML",
+              reply_markup: isLastPhoto
                 ? { inline_keyboard: [[{ text: "🔙 Main Menu", callback_data: "main_menu" }]] }
                 : undefined
             });
