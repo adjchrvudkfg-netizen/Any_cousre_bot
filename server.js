@@ -60,7 +60,7 @@ function getState(userId) {
   return userState[userId];
 }
 
-function buildWelcomeInlineKeyboard() {
+function buildTopMenuInlineKeyboard() {
   const inlineKeyboard = MAIN_MENU_BUTTONS.map((row) =>
     row.map((label) => {
       const idx = MAIN_BUTTON_NAMES.indexOf(label);
@@ -111,6 +111,16 @@ async function sendWelcomeCard(chatId, user) {
   const firstName = user.first_name || "Student";
   const roleLabel = isAdmin(user.id) ? "Admin" : "Student";
 
+  // Sirf upar wale inline buttons message mein dikhenge
+  await bot.sendMessage(
+    chatId,
+    "📌 *Select an Option Below:*",
+    {
+      parse_mode: "Markdown",
+      ...buildTopMenuInlineKeyboard()
+    }
+  );
+
   const text = [
     "🌸 - STUDY MATERIAL BOT - 🌸",
     "",
@@ -131,15 +141,10 @@ async function sendWelcomeCard(chatId, user) {
     `🎖️ Access: ${roleLabel}`,
     "━━━━━━━━━━━━━━━━━━━━",
     "",
-    "Tap any button below to begin."
+    "Tap any button above to begin."
   ].join("\n");
 
-  // Pehle neeche ka old bottom reply keyboard clear karein (agar khula ho)
-  await bot.sendMessage(chatId, "🔄 Loading Study Material menu...", {
-    reply_markup: { remove_keyboard: true }
-  }).catch(() => {});
-
-  return bot.sendMessage(chatId, text, buildWelcomeInlineKeyboard());
+  return bot.sendMessage(chatId, text);
 }
 
 function getAiAssistantReply(queryText, state) {
@@ -377,7 +382,7 @@ bot.on("document", (msg) => {
   );
 });
 
-// Inline callbacks for Welcome Buttons, Units, Chapters & PDFs
+// Inline callbacks for Menu Buttons, Units, Chapters & PDFs
 bot.on("callback_query", (query) => {
   const chatId = query.message.chat.id;
   const userId = query.from.id;
