@@ -1,9 +1,20 @@
-
 {
-  "structure": {
-    "bp": [],
-    "dp": [],
-    "cet": [],
-    "12": []
+  "courses": {
+    "bp": {
+      "name": "B.Pharm",
+      "semesters": {}
+    },
+    "dp": {
+      "name": "D.Pharm",
+      "semesters": {}
+    },
+    "cet": {
+      "name": "Rajasthan CET",
+      "semesters": {}
+    },
+    "class12": {
+      "name": "12th Class",
+      "semesters": {}
+    }
   }
 }
