@@ -51,22 +51,53 @@ const CATEGORIES = {
 
 const CATEGORY_LIST = Object.keys(CATEGORIES);
 
-const DEFAULT_SEMESTERS_BY_STREAM = {
-  "B.Pharma": [
-    "Semester 1",
-    "Semester 2",
-    "Semester 3",
-    "Semester 4",
-    "Semester 5",
-    "Semester 6",
-    "Semester 7",
-    "Semester 8"
-  ],
-  "D.Pharma": ["Year 1", "Year 2"]
+const DEFAULT_YEARS_BY_COURSE = {
+  "B.Pharma": ["1st Year", "2nd Year", "3rd Year", "4th Year"],
+  "D.Pharma": ["1st Year", "2nd Year"]
+};
+
+const DEFAULT_SEMESTERS_BY_YEAR = {
+  "B.Pharma": {
+    "1st Year": ["Semester 1", "Semester 2"],
+    "2nd Year": ["Semester 3", "Semester 4"],
+    "3rd Year": ["Semester 5", "Semester 6"],
+    "4th Year": ["Semester 7", "Semester 8"]
+  },
+  "D.Pharma": {
+    "1st Year": ["Year 1 Syllabus"],
+    "2nd Year": ["Year 2 Syllabus"]
+  }
+};
+
+const DEFAULT_DIRECT_SEMESTERS_BY_COURSE = {
+  "CET 12th Level": ["Semester 1", "Semester 2"],
+  "CET Graduation Level": ["Semester 1", "Semester 2"],
+  "Science": ["Semester 1", "Semester 2"],
+  "Commerce": ["Semester 1", "Semester 2"],
+  "Arts": ["Semester 1", "Semester 2"],
+  "SSC GD": ["Part 1", "Part 2"],
+  "SSC CHSL": ["Tier 1", "Tier 2"],
+  "SSC CGL": ["Tier 1", "Tier 2"],
+  "SSC MTS": ["Session 1", "Session 2"],
+  "RRB NTPC": ["CBT 1", "CBT 2"],
+  "RRB Group D": ["Stage 1"],
+  "RRB ALP": ["CBT 1", "CBT 2"],
+  "RRB JE": ["CBT 1", "CBT 2"],
+  "Group X (Science)": ["Phase 1"],
+  "Group Y (Non-Tech)": ["Phase 1"],
+  "Agniveer Vayu": ["Phase 1"],
+  "Agniveer GD": ["Phase 1"],
+  "Agniveer Technical": ["Phase 1"],
+  "Nursing Assistant": ["Phase 1"],
+  "Clerk / SKT": ["Phase 1"],
+  "Agniveer SSR": ["Stage 1"],
+  "Agniveer MR": ["Stage 1"]
 };
 
 let studyDb = {
+  // Structure: materials[category][course][periodKey][studyType][unitName] = { chapters: { [chapterName]: [pdfObj] } }
   materials: {},
+  customYears: {},
   customSemesters: {},
   links: {
     admitCards: {},
@@ -96,11 +127,11 @@ axios.interceptors.request.use((request) => {
             const callback = button.callback_data || "";
             let style = "success";
 
-            if (text.includes("Syllabus") || text.includes("Hand Written Notes") || text.includes("Semester")) {
+            if (text.includes("Syllabus") || text.includes("Hand Written Notes") || text.includes("Year") || text.includes("Semester")) {
               style = "primary";
             } else if (text.includes("Back") || text.includes("Main Menu")) {
               style = "danger";
-            } else if (callback.startsWith("sem_") || callback.startsWith("unit_")) {
+            } else if (callback.startsWith("yr_") || callback.startsWith("sem_") || callback.startsWith("unit_")) {
               style = "success";
             }
 
@@ -129,6 +160,7 @@ try {
     if (raw && raw.trim().length > 0) {
       const parsed = JSON.parse(raw);
       if (parsed.materials) studyDb.materials = parsed.materials;
+      if (parsed.customYears) studyDb.customYears = parsed.customYears;
       if (parsed.customSemesters) studyDb.customSemesters = parsed.customSemesters;
       if (parsed.links) {
         studyDb.links = {
@@ -158,6 +190,7 @@ function getUser(userId, firstName) {
       selectedType: null,
       selectedCategory: null,
       selectedStream: null,
+      selectedYear: null,
       selectedSemester: null,
       adminUploadFlow: null
     };
@@ -168,56 +201,92 @@ function getUser(userId, firstName) {
   return studyDb.users[userId];
 }
 
-function getSemestersForStream(category, stream) {
-  const key = `${category}::${stream}`;
-  const baseList = DEFAULT_SEMESTERS_BY_STREAM[stream] || ["Semester 1", "Semester 2"];
-  const extraList = studyDb.customSemesters[key] || [];
-  const merged = [...baseList];
+function getYearsForCourse(category, course) {
+  const key = `${category}::${course}`;
+  const baseYears = DEFAULT_YEARS_BY_COURSE[course] || [];
+  const extraYears = studyDb.customYears[key] || [];
+  const merged = [...baseYears];
 
-  if (
-    studyDb.materials[category] &&
-    studyDb.materials[category][stream]
-  ) {
-    for (const semName of Object.keys(studyDb.materials[category][stream])) {
-      if (!merged.includes(semName)) merged.push(semName);
+  for (const yr of extraYears) {
+    if (!merged.includes(yr)) merged.push(yr);
+  }
+
+  return merged;
+}
+
+function getSemestersForCourse(category, course, yearName = null) {
+  const key = yearName
+    ? `${category}::${course}::${yearName}`
+    : `${category}::${course}`;
+
+  let baseSems = [];
+  if (yearName && DEFAULT_SEMESTERS_BY_YEAR[course] && DEFAULT_SEMESTERS_BY_YEAR[course][yearName]) {
+    baseSems = [...DEFAULT_SEMESTERS_BY_YEAR[course][yearName]];
+  } else if (!yearName && DEFAULT_DIRECT_SEMESTERS_BY_COURSE[course]) {
+    baseSems = [...DEFAULT_DIRECT_SEMESTERS_BY_COURSE[course]];
+  } else if (!yearName && !DEFAULT_YEARS_BY_COURSE[course]) {
+    baseSems = ["Semester 1", "Semester 2"];
+  }
+
+  const extraSems = studyDb.customSemesters[key] || [];
+  const merged = [...baseSems];
+
+  const storagePeriodKey = yearName ? `${yearName} > ...` : null;
+  if (!storagePeriodKey && studyDb.materials[category] && studyDb.materials[category][course]) {
+    for (const semKey of Object.keys(studyDb.materials[category][course])) {
+      if (!semKey.includes(" > ") && !merged.includes(semKey)) {
+        merged.push(semKey);
+      }
+    }
+  } else if (yearName && studyDb.materials[category] && studyDb.materials[category][course]) {
+    const prefix = `${yearName} > `;
+    for (const fullKey of Object.keys(studyDb.materials[category][course])) {
+      if (fullKey.startsWith(prefix)) {
+        const semOnly = fullKey.slice(prefix.length);
+        if (!merged.includes(semOnly)) merged.push(semOnly);
+      }
     }
   }
 
-  for (const semName of extraList) {
+  for (const semName of extraSems) {
     if (!merged.includes(semName)) merged.push(semName);
   }
 
   return merged;
 }
 
-function ensureSemester(category, stream, semester, createIfMissing = false) {
+function buildPeriodStorageKey(yearName, semesterName) {
+  return yearName ? `${yearName} > ${semesterName}` : semesterName;
+}
+
+function ensurePeriod(category, course, periodKey, createIfMissing = false) {
   if (!studyDb.materials[category]) {
     if (!createIfMissing) return null;
     studyDb.materials[category] = {};
   }
-  if (!studyDb.materials[category][stream]) {
+  if (!studyDb.materials[category][course]) {
     if (!createIfMissing) return null;
-    studyDb.materials[category][stream] = {};
+    studyDb.materials[category][course] = {};
   }
-  if (!studyDb.materials[category][stream][semester]) {
+  if (!studyDb.materials[category][course][periodKey]) {
     if (!createIfMissing) return null;
-    studyDb.materials[category][stream][semester] = {};
+    studyDb.materials[category][course][periodKey] = {};
   }
-  return studyDb.materials[category][stream][semester];
+  return studyDb.materials[category][course][periodKey];
 }
 
-function getUnitBucket(category, stream, semester, studyType, createIfMissing = false) {
-  const semObj = ensureSemester(category, stream, semester, createIfMissing);
-  if (!semObj) return null;
+function getUnitBucket(category, course, periodKey, studyType, createIfMissing = false) {
+  const periodObj = ensurePeriod(category, course, periodKey, createIfMissing);
+  if (!periodObj) return null;
 
-  if (!semObj[studyType]) {
+  if (!periodObj[studyType]) {
     if (!createIfMissing) return null;
-    semObj[studyType] = { units: {} };
+    periodObj[studyType] = { units: {} };
   }
-  if (!semObj[studyType].units) {
-    semObj[studyType].units = {};
+  if (!periodObj[studyType].units) {
+    periodObj[studyType].units = {};
   }
-  return semObj[studyType];
+  return periodObj[studyType];
 }
 
 function getMainMenuMarkup(user) {
@@ -267,11 +336,26 @@ function getAiAssistantReply(questionText, user) {
   const scope = [
     user.selectedCategory,
     user.selectedStream,
+    user.selectedYear,
     user.selectedSemester,
     user.selectedType
   ]
     .filter(Boolean)
     .join(" > ");
+
+  if (user.selectedType === "Hand Written Notes") {
+    return (
+`✍️ <b>HAND WRITTEN NOTES — QUICK NOTEBOOK SUMMARY</b>
+
+📌 <b>Scope:</b> <code>${scope || "Hand Written Notes"}</code>
+📖 <b>Topic:</b> <b>${questionText}</b>
+
+📝 <b>Key Points (Notebook Style):</b>
+• <b>Concept / Definition:</b> ${questionText} ko short aur exam-ready points mein samjhein.
+• <b>Important Points / Rules:</b> Main headings, steps, formulas, ya examples note karein.
+• <b>Full Handwritten Notes:</b> Complete notes ke liye <b>Hand Written Notes</b> section mein Course &gt; Year/Semester &gt; Unit &gt; Topic open karein.`
+    );
+  }
 
   return (
 `🤖 <b>STUDY MATERIAL AI ASSISTANT</b>
@@ -279,8 +363,8 @@ function getAiAssistantReply(questionText, user) {
 📌 <b>Scope:</b> <code>${scope || "General Study"}</code>
 ❓ <b>Topic / Doubt:</b> ${questionText}
 
-💡 <b>Study Tip:</b> Pehle is topic ka Syllabus points aur Revision Notes dekhein, uske baad PYQ aur MCQ practice karein.
-📄 Official PDFs / Notes ke liye <b>Hand Written Notes</b>, <b>Syllabus</b>, <b>PYQ Question</b>, <b>MCQ Question</b>, <b>Mock Test</b>, ya <b>Revision Notes</b> section open karein.`
+💡 <b>Study Tip:</b> Pehle is topic ka Syllabus aur Revision Notes dekhein, uske baad PYQ aur MCQ practice karein.
+📄 Official PDFs / Notes ke liye <b>Syllabus</b>, <b>Hand Written Notes</b>, <b>PYQ Question</b>, <b>MCQ Question</b>, <b>Mock Test</b>, ya <b>Revision Notes</b> section open karein.`
   );
 }
 
@@ -298,7 +382,7 @@ app.post('/webhook', async (req, res) => {
       const text = (update.message.text || "").trim();
       const user = getUser(from.id, from.first_name);
 
-      // Strict PDF / Document upload restriction: Sirf Admin PDF add kar sakta hai
+      // Strict PDF upload: Sirf Admin PDF add kar sakta hai
       if (update.message.document) {
         if (!isAdmin(from.id)) {
           await axios.post(`${TELEGRAM_API}/sendMessage`, {
@@ -313,7 +397,7 @@ app.post('/webhook', async (req, res) => {
         if (!flow || flow.step !== "WAITING_PDF") {
           await axios.post(`${TELEGRAM_API}/sendMessage`, {
             chat_id: chatId,
-            text: "ℹ️ Pehle <code>/add_pdf Category | Stream | Semester | StudyType | UnitName | ChapterOrNoteName | Title</code> bhejein, phir PDF file upload karein.",
+            text: "ℹ️ Pehle <code>/add_pdf</code> command bhejein, phir PDF file upload karein.",
             parse_mode: "HTML"
           });
           return;
@@ -333,7 +417,7 @@ app.post('/webhook', async (req, res) => {
           return;
         }
 
-        const bucket = getUnitBucket(flow.category, flow.stream, flow.semester, flow.studyType, true);
+        const bucket = getUnitBucket(flow.category, flow.course, flow.periodKey, flow.studyType, true);
         if (!bucket.units[flow.unitName]) {
           bucket.units[flow.unitName] = { chapters: {} };
         }
@@ -358,8 +442,8 @@ app.post('/webhook', async (req, res) => {
 `✅ <b>Material / PDF Added!</b>
 
 📚 <b>Module:</b> ${flow.studyType}
-🎓 <b>Category:</b> ${flow.category} (${flow.stream})
-🗓️ <b>Semester:</b> ${flow.semester}
+🎓 <b>Category / Course:</b> ${flow.category} > ${flow.course}
+🗓️ <b>Period:</b> ${flow.periodKey}
 📂 <b>Unit:</b> ${flow.unitName}
 📘 <b>Topic / Chapter:</b> ${flow.chapterName}
 📄 <b>Title:</b> <code>${flow.title}</code>`,
@@ -372,6 +456,7 @@ app.post('/webhook', async (req, res) => {
         user.selectedType = null;
         user.selectedCategory = null;
         user.selectedStream = null;
+        user.selectedYear = null;
         user.selectedSemester = null;
         user.adminUploadFlow = null;
         saveData();
@@ -394,141 +479,181 @@ app.post('/webhook', async (req, res) => {
           reply_markup: menu.reply_markup
         });
       }
-      // ADMIN ONLY: /add_semester Category | Stream | SemesterName
+      // ADMIN ONLY: /add_year Category | Course | YearName
+      else if (text.startsWith('/add_year')) {
+        if (!isAdmin(from.id)) {
+          await axios.post(`${TELEGRAM_API}/sendMessage`, { chat_id: chatId, text: "⛔ Sirf Admin hi year add kar sakta hai." });
+          return;
+        }
+        const parts = text.replace('/add_year', '').trim().split('|').map((s) => s.trim());
+        if (parts.length < 3) {
+          await axios.post(`${TELEGRAM_API}/sendMessage`, {
+            chat_id: chatId,
+            text: "⚠️ Use: <code>/add_year Category | Course | YearName</code>",
+            parse_mode: "HTML"
+          });
+          return;
+        }
+        const [category, course, yearName] = parts;
+        const key = `${category}::${course}`;
+        if (!studyDb.customYears[key]) studyDb.customYears[key] = [];
+        if (!studyDb.customYears[key].includes(yearName)) studyDb.customYears[key].push(yearName);
+        saveData();
+        await axios.post(`${TELEGRAM_API}/sendMessage`, {
+          chat_id: chatId,
+          text: `✅ <b>Year Added!</b>\n${category} > ${course} > <b>${yearName}</b>`,
+          parse_mode: "HTML"
+        });
+      }
+      // ADMIN ONLY: /remove_year Category | Course | YearName
+      else if (text.startsWith('/remove_year')) {
+        if (!isAdmin(from.id)) {
+          await axios.post(`${TELEGRAM_API}/sendMessage`, { chat_id: chatId, text: "⛔ Sirf Admin hi year remove kar sakta hai." });
+          return;
+        }
+        const parts = text.replace('/remove_year', '').trim().split('|').map((s) => s.trim());
+        if (parts.length < 3) {
+          await axios.post(`${TELEGRAM_API}/sendMessage`, {
+            chat_id: chatId,
+            text: "⚠️ Use: <code>/remove_year Category | Course | YearName</code>",
+            parse_mode: "HTML"
+          });
+          return;
+        }
+        const [category, course, yearName] = parts;
+        const key = `${category}::${course}`;
+        if (studyDb.customYears[key]) {
+          studyDb.customYears[key] = studyDb.customYears[key].filter((y) => y !== yearName);
+        }
+        if (studyDb.materials[category] && studyDb.materials[category][course]) {
+          for (const pKey of Object.keys(studyDb.materials[category][course])) {
+            if (pKey === yearName || pKey.startsWith(`${yearName} > `)) {
+              delete studyDb.materials[category][course][pKey];
+            }
+          }
+        }
+        saveData();
+        await axios.post(`${TELEGRAM_API}/sendMessage`, {
+          chat_id: chatId,
+          text: `🗑️ Year <b>${yearName}</b> removed for ${category} > ${course}.`,
+          parse_mode: "HTML"
+        });
+      }
+      // ADMIN ONLY: /add_semester Category | Course | YearOrNone | SemesterName
       else if (text.startsWith('/add_semester')) {
         if (!isAdmin(from.id)) {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, {
-            chat_id: chatId,
-            text: "⛔ Sirf Admin hi semester add kar sakta hai."
-          });
+          await axios.post(`${TELEGRAM_API}/sendMessage`, { chat_id: chatId, text: "⛔ Sirf Admin hi semester add kar sakta hai." });
           return;
         }
-        const payload = text.replace('/add_semester', '').trim();
-        const parts = payload.split('|').map((s) => s.trim());
-        if (parts.length < 3) {
+        const parts = text.replace('/add_semester', '').trim().split('|').map((s) => s.trim());
+        if (parts.length < 4) {
           await axios.post(`${TELEGRAM_API}/sendMessage`, {
             chat_id: chatId,
-            text: "⚠️ Use: <code>/add_semester Category | Stream | SemesterName</code>",
+            text: "⚠️ Use: <code>/add_semester Category | Course | YearName (or -) | SemesterName</code>\nExample: <code>/add_semester Pharmacy | B.Pharma | 1st Year | Semester 1</code>",
             parse_mode: "HTML"
           });
           return;
         }
-        const [category, stream, semesterName] = parts;
-        if (!CATEGORIES[category] || !CATEGORIES[category].includes(stream)) {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, {
-            chat_id: chatId,
-            text: "❌ Invalid Category ya Stream."
-          });
-          return;
+        const [category, course, yearRaw, semesterName] = parts;
+        const yearName = (!yearRaw || yearRaw === "-" || yearRaw.toLowerCase() === "none") ? null : yearRaw;
+        const semKey = yearName ? `${category}::${course}::${yearName}` : `${category}::${course}`;
+        if (!studyDb.customSemesters[semKey]) studyDb.customSemesters[semKey] = [];
+        if (!studyDb.customSemesters[semKey].includes(semesterName)) {
+          studyDb.customSemesters[semKey].push(semesterName);
         }
-        const key = `${category}::${stream}`;
-        if (!studyDb.customSemesters[key]) studyDb.customSemesters[key] = [];
-        if (!studyDb.customSemesters[key].includes(semesterName)) {
-          studyDb.customSemesters[key].push(semesterName);
-        }
-        ensureSemester(category, stream, semesterName, true);
+        const periodKey = buildPeriodStorageKey(yearName, semesterName);
+        ensurePeriod(category, course, periodKey, true);
         saveData();
 
         await axios.post(`${TELEGRAM_API}/sendMessage`, {
           chat_id: chatId,
-          text: `✅ <b>Semester Added!</b>\n${category} > ${stream} > <b>${semesterName}</b>`,
+          text: `✅ <b>Semester Added!</b>\n${category} > ${course} > <b>${periodKey}</b>`,
           parse_mode: "HTML"
         });
       }
-      // ADMIN ONLY: /remove_semester Category | Stream | SemesterName
+      // ADMIN ONLY: /remove_semester Category | Course | YearOrNone | SemesterName
       else if (text.startsWith('/remove_semester')) {
         if (!isAdmin(from.id)) {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, {
-            chat_id: chatId,
-            text: "⛔ Sirf Admin hi semester remove kar sakta hai."
-          });
+          await axios.post(`${TELEGRAM_API}/sendMessage`, { chat_id: chatId, text: "⛔ Sirf Admin hi semester remove kar sakta hai." });
           return;
         }
-        const payload = text.replace('/remove_semester', '').trim();
-        const parts = payload.split('|').map((s) => s.trim());
-        if (parts.length < 3) {
+        const parts = text.replace('/remove_semester', '').trim().split('|').map((s) => s.trim());
+        if (parts.length < 4) {
           await axios.post(`${TELEGRAM_API}/sendMessage`, {
             chat_id: chatId,
-            text: "⚠️ Use: <code>/remove_semester Category | Stream | SemesterName</code>",
+            text: "⚠️ Use: <code>/remove_semester Category | Course | YearName (or -) | SemesterName</code>",
             parse_mode: "HTML"
           });
           return;
         }
-        const [category, stream, semesterName] = parts;
-        const key = `${category}::${stream}`;
-        if (studyDb.customSemesters[key]) {
-          studyDb.customSemesters[key] = studyDb.customSemesters[key].filter((s) => s !== semesterName);
+        const [category, course, yearRaw, semesterName] = parts;
+        const yearName = (!yearRaw || yearRaw === "-" || yearRaw.toLowerCase() === "none") ? null : yearRaw;
+        const semKey = yearName ? `${category}::${course}::${yearName}` : `${category}::${course}`;
+        if (studyDb.customSemesters[semKey]) {
+          studyDb.customSemesters[semKey] = studyDb.customSemesters[semKey].filter((s) => s !== semesterName);
         }
-        if (studyDb.materials[category] && studyDb.materials[category][stream]) {
-          delete studyDb.materials[category][stream][semesterName];
+        const periodKey = buildPeriodStorageKey(yearName, semesterName);
+        if (studyDb.materials[category] && studyDb.materials[category][course]) {
+          delete studyDb.materials[category][course][periodKey];
         }
         saveData();
 
         await axios.post(`${TELEGRAM_API}/sendMessage`, {
           chat_id: chatId,
-          text: `🗑️ Semester <b>${semesterName}</b> removed for ${category} > ${stream}.`,
+          text: `🗑️ Semester <b>${periodKey}</b> removed.`,
           parse_mode: "HTML"
         });
       }
-      // ADMIN ONLY: /add_unit Category | Stream | Semester | StudyType | UnitName
+      // ADMIN ONLY: /add_unit Category | Course | YearOrNone | Semester | StudyType | UnitName
       else if (text.startsWith('/add_unit')) {
         if (!isAdmin(from.id)) {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, {
-            chat_id: chatId,
-            text: "⛔ Sirf Admin hi unit add kar sakta hai."
-          });
+          await axios.post(`${TELEGRAM_API}/sendMessage`, { chat_id: chatId, text: "⛔ Sirf Admin hi unit add kar sakta hai." });
           return;
         }
-        const payload = text.replace('/add_unit', '').trim();
-        const parts = payload.split('|').map((s) => s.trim());
-        if (parts.length < 5) {
+        const parts = text.replace('/add_unit', '').trim().split('|').map((s) => s.trim());
+        if (parts.length < 6) {
           await axios.post(`${TELEGRAM_API}/sendMessage`, {
             chat_id: chatId,
-            text: "⚠️ Use: <code>/add_unit Category | Stream | Semester | StudyType | UnitName</code>",
+            text: "⚠️ Use: <code>/add_unit Category | Course | YearName (or -) | Semester | StudyType | UnitName</code>",
             parse_mode: "HTML"
           });
           return;
         }
-        const [category, stream, semester, studyType, unitName] = parts;
-        if (!CATEGORIES[category] || !CATEGORIES[category].includes(stream) || !ALLOWED_STUDY_TYPES.includes(studyType)) {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, {
-            chat_id: chatId,
-            text: "❌ Invalid Category, Stream, ya StudyType."
-          });
-          return;
-        }
-        const bucket = getUnitBucket(category, stream, semester, studyType, true);
+        const [category, course, yearRaw, semester, studyType, unitName] = parts;
+        const yearName = (!yearRaw || yearRaw === "-" || yearRaw.toLowerCase() === "none") ? null : yearRaw;
+        const periodKey = buildPeriodStorageKey(yearName, semester);
+
+        const bucket = getUnitBucket(category, course, periodKey, studyType, true);
         if (!bucket.units[unitName]) {
           bucket.units[unitName] = { chapters: {} };
         }
         saveData();
         await axios.post(`${TELEGRAM_API}/sendMessage`, {
           chat_id: chatId,
-          text: `✅ <b>Unit Added!</b>\n${category} > ${stream} > ${semester} > ${studyType}\nUnit: <b>${unitName}</b>`,
+          text: `✅ <b>Unit Added!</b>\n${category} > ${course} > ${periodKey} > ${studyType}\nUnit: <b>${unitName}</b>`,
           parse_mode: "HTML"
         });
       }
-      // ADMIN ONLY: /remove_unit Category | Stream | Semester | StudyType | UnitName
+      // ADMIN ONLY: /remove_unit Category | Course | YearOrNone | Semester | StudyType | UnitName
       else if (text.startsWith('/remove_unit')) {
         if (!isAdmin(from.id)) {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, {
-            chat_id: chatId,
-            text: "⛔ Sirf Admin hi unit remove kar sakta hai."
-          });
+          await axios.post(`${TELEGRAM_API}/sendMessage`, { chat_id: chatId, text: "⛔ Sirf Admin hi unit remove kar sakta hai." });
           return;
         }
-        const payload = text.replace('/remove_unit', '').trim();
-        const parts = payload.split('|').map((s) => s.trim());
-        if (parts.length < 5) {
+        const parts = text.replace('/remove_unit', '').trim().split('|').map((s) => s.trim());
+        if (parts.length < 6) {
           await axios.post(`${TELEGRAM_API}/sendMessage`, {
             chat_id: chatId,
-            text: "⚠️ Use: <code>/remove_unit Category | Stream | Semester | StudyType | UnitName</code>",
+            text: "⚠️ Use: <code>/remove_unit Category | Course | YearName (or -) | Semester | StudyType | UnitName</code>",
             parse_mode: "HTML"
           });
           return;
         }
-        const [category, stream, semester, studyType, unitName] = parts;
-        const bucket = getUnitBucket(category, stream, semester, studyType, false);
+        const [category, course, yearRaw, semester, studyType, unitName] = parts;
+        const yearName = (!yearRaw || yearRaw === "-" || yearRaw.toLowerCase() === "none") ? null : yearRaw;
+        const periodKey = buildPeriodStorageKey(yearName, semester);
+
+        const bucket = getUnitBucket(category, course, periodKey, studyType, false);
         const existed = !!(bucket && bucket.units && bucket.units[unitName]);
         if (existed) {
           delete bucket.units[unitName];
@@ -542,34 +667,26 @@ app.post('/webhook', async (req, res) => {
           parse_mode: "HTML"
         });
       }
-      // ADMIN ONLY: /add_chapter Category | Stream | Semester | StudyType | UnitName | ChapterOrNoteName
+      // ADMIN ONLY: /add_chapter Category | Course | YearOrNone | Semester | StudyType | UnitName | ChapterName
       else if (text.startsWith('/add_chapter')) {
         if (!isAdmin(from.id)) {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, {
-            chat_id: chatId,
-            text: "⛔ Sirf Admin hi chapter/material add kar sakta hai."
-          });
+          await axios.post(`${TELEGRAM_API}/sendMessage`, { chat_id: chatId, text: "⛔ Sirf Admin hi chapter/material add kar sakta hai." });
           return;
         }
-        const payload = text.replace('/add_chapter', '').trim();
-        const parts = payload.split('|').map((s) => s.trim());
-        if (parts.length < 6) {
+        const parts = text.replace('/add_chapter', '').trim().split('|').map((s) => s.trim());
+        if (parts.length < 7) {
           await axios.post(`${TELEGRAM_API}/sendMessage`, {
             chat_id: chatId,
-            text: "⚠️ Use: <code>/add_chapter Category | Stream | Semester | StudyType | UnitName | ChapterOrNoteName</code>",
+            text: "⚠️ Use: <code>/add_chapter Category | Course | YearName (or -) | Semester | StudyType | UnitName | ChapterName</code>",
             parse_mode: "HTML"
           });
           return;
         }
-        const [category, stream, semester, studyType, unitName, chapterName] = parts;
-        if (!CATEGORIES[category] || !CATEGORIES[category].includes(stream) || !ALLOWED_STUDY_TYPES.includes(studyType)) {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, {
-            chat_id: chatId,
-            text: "❌ Invalid Category, Stream, ya StudyType."
-          });
-          return;
-        }
-        const bucket = getUnitBucket(category, stream, semester, studyType, true);
+        const [category, course, yearRaw, semester, studyType, unitName, chapterName] = parts;
+        const yearName = (!yearRaw || yearRaw === "-" || yearRaw.toLowerCase() === "none") ? null : yearRaw;
+        const periodKey = buildPeriodStorageKey(yearName, semester);
+
+        const bucket = getUnitBucket(category, course, periodKey, studyType, true);
         if (!bucket.units[unitName]) {
           bucket.units[unitName] = { chapters: {} };
         }
@@ -579,31 +696,30 @@ app.post('/webhook', async (req, res) => {
         saveData();
         await axios.post(`${TELEGRAM_API}/sendMessage`, {
           chat_id: chatId,
-          text: `✅ <b>Section / Chapter Added!</b>\n${category} > ${stream} > ${semester} > ${studyType}\nUnit: <b>${unitName}</b>\nTopic: <b>${chapterName}</b>`,
+          text: `✅ <b>Chapter / Syllabus Section Added!</b>\n${category} > ${course} > ${periodKey} > ${studyType}\nUnit: <b>${unitName}</b>\nTopic: <b>${chapterName}</b>`,
           parse_mode: "HTML"
         });
       }
-      // ADMIN ONLY: /remove_chapter Category | Stream | Semester | StudyType | UnitName | ChapterOrNoteName
+      // ADMIN ONLY: /remove_chapter Category | Course | YearOrNone | Semester | StudyType | UnitName | ChapterName
       else if (text.startsWith('/remove_chapter')) {
         if (!isAdmin(from.id)) {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, {
-            chat_id: chatId,
-            text: "⛔ Sirf Admin hi chapter/material remove kar sakta hai."
-          });
+          await axios.post(`${TELEGRAM_API}/sendMessage`, { chat_id: chatId, text: "⛔ Sirf Admin hi chapter/material remove kar sakta hai." });
           return;
         }
-        const payload = text.replace('/remove_chapter', '').trim();
-        const parts = payload.split('|').map((s) => s.trim());
-        if (parts.length < 6) {
+        const parts = text.replace('/remove_chapter', '').trim().split('|').map((s) => s.trim());
+        if (parts.length < 7) {
           await axios.post(`${TELEGRAM_API}/sendMessage`, {
             chat_id: chatId,
-            text: "⚠️ Use: <code>/remove_chapter Category | Stream | Semester | StudyType | UnitName | ChapterOrNoteName</code>",
+            text: "⚠️ Use: <code>/remove_chapter Category | Course | YearName (or -) | Semester | StudyType | UnitName | ChapterName</code>",
             parse_mode: "HTML"
           });
           return;
         }
-        const [category, stream, semester, studyType, unitName, chapterName] = parts;
-        const bucket = getUnitBucket(category, stream, semester, studyType, false);
+        const [category, course, yearRaw, semester, studyType, unitName, chapterName] = parts;
+        const yearName = (!yearRaw || yearRaw === "-" || yearRaw.toLowerCase() === "none") ? null : yearRaw;
+        const periodKey = buildPeriodStorageKey(yearName, semester);
+
+        const bucket = getUnitBucket(category, course, periodKey, studyType, false);
         const existed = !!(
           bucket &&
           bucket.units &&
@@ -618,43 +734,35 @@ app.post('/webhook', async (req, res) => {
         await axios.post(`${TELEGRAM_API}/sendMessage`, {
           chat_id: chatId,
           text: existed
-            ? `🗑️ Section / Chapter <b>${chapterName}</b> removed!`
-            : `⚠️ Section / Chapter <b>${chapterName}</b> nahi mila.`,
+            ? `🗑️ Chapter / Syllabus Section <b>${chapterName}</b> removed!`
+            : `⚠️ Chapter / Syllabus Section <b>${chapterName}</b> nahi mila.`,
           parse_mode: "HTML"
         });
       }
-      // ADMIN ONLY: /add_pdf Category | Stream | Semester | StudyType | UnitName | ChapterOrNoteName | PDF Title
+      // ADMIN ONLY: /add_pdf Category | Course | YearOrNone | Semester | StudyType | UnitName | ChapterName | PDF Title
       else if (text.startsWith('/add_pdf')) {
         if (!isAdmin(from.id)) {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, {
-            chat_id: chatId,
-            text: "⛔ Sirf Admin hi PDF add kar sakta hai."
-          });
+          await axios.post(`${TELEGRAM_API}/sendMessage`, { chat_id: chatId, text: "⛔ Sirf Admin hi PDF add kar sakta hai." });
           return;
         }
-        const payload = text.replace('/add_pdf', '').trim();
-        const parts = payload.split('|').map((s) => s.trim());
-        if (parts.length < 7) {
+        const parts = text.replace('/add_pdf', '').trim().split('|').map((s) => s.trim());
+        if (parts.length < 8) {
           await axios.post(`${TELEGRAM_API}/sendMessage`, {
             chat_id: chatId,
-            text: "⚠️ Use: <code>/add_pdf Category | Stream | Semester | StudyType | UnitName | ChapterOrNoteName | PDF Title</code>",
+            text: "⚠️ Use: <code>/add_pdf Category | Course | YearName (or -) | Semester | StudyType | UnitName | ChapterName | PDF Title</code>",
             parse_mode: "HTML"
           });
           return;
         }
-        const [category, stream, semester, studyType, unitName, chapterName, title] = parts;
-        if (!CATEGORIES[category] || !CATEGORIES[category].includes(stream) || !ALLOWED_STUDY_TYPES.includes(studyType)) {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, {
-            chat_id: chatId,
-            text: "❌ Invalid Category, Stream, ya StudyType."
-          });
-          return;
-        }
+        const [category, course, yearRaw, semester, studyType, unitName, chapterName, title] = parts;
+        const yearName = (!yearRaw || yearRaw === "-" || yearRaw.toLowerCase() === "none") ? null : yearRaw;
+        const periodKey = buildPeriodStorageKey(yearName, semester);
+
         user.adminUploadFlow = {
           step: "WAITING_PDF",
           category,
-          stream,
-          semester,
+          course,
+          periodKey,
           studyType,
           unitName,
           chapterName,
@@ -663,31 +771,30 @@ app.post('/webhook', async (req, res) => {
         saveData();
         await axios.post(`${TELEGRAM_API}/sendMessage`, {
           chat_id: chatId,
-          text: `📎 Ab <b>${title}</b> ke liye PDF bhejein.\nTarget: ${category} > ${stream} > ${semester} > ${studyType} > ${unitName} > ${chapterName}`,
+          text: `📎 Ab <b>${title}</b> ke liye PDF bhejein.\nTarget: ${category} > ${course} > ${periodKey} > ${studyType} > ${unitName} > ${chapterName}`,
           parse_mode: "HTML"
         });
       }
-      // ADMIN ONLY: /remove_pdf Category | Stream | Semester | StudyType | UnitName | ChapterOrNoteName | PDF Title
+      // ADMIN ONLY: /remove_pdf Category | Course | YearOrNone | Semester | StudyType | UnitName | ChapterName | PDF Title
       else if (text.startsWith('/remove_pdf')) {
         if (!isAdmin(from.id)) {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, {
-            chat_id: chatId,
-            text: "⛔ Sirf Admin hi PDF remove kar sakta hai."
-          });
+          await axios.post(`${TELEGRAM_API}/sendMessage`, { chat_id: chatId, text: "⛔ Sirf Admin hi PDF remove kar sakta hai." });
           return;
         }
-        const payload = text.replace('/remove_pdf', '').trim();
-        const parts = payload.split('|').map((s) => s.trim());
-        if (parts.length < 7) {
+        const parts = text.replace('/remove_pdf', '').trim().split('|').map((s) => s.trim());
+        if (parts.length < 8) {
           await axios.post(`${TELEGRAM_API}/sendMessage`, {
             chat_id: chatId,
-            text: "⚠️ Use: <code>/remove_pdf Category | Stream | Semester | StudyType | UnitName | ChapterOrNoteName | PDF Title</code>",
+            text: "⚠️ Use: <code>/remove_pdf Category | Course | YearName (or -) | Semester | StudyType | UnitName | ChapterName | PDF Title</code>",
             parse_mode: "HTML"
           });
           return;
         }
-        const [category, stream, semester, studyType, unitName, chapterName, title] = parts;
-        const bucket = getUnitBucket(category, stream, semester, studyType, false);
+        const [category, course, yearRaw, semester, studyType, unitName, chapterName, title] = parts;
+        const yearName = (!yearRaw || yearRaw === "-" || yearRaw.toLowerCase() === "none") ? null : yearRaw;
+        const periodKey = buildPeriodStorageKey(yearName, semester);
+
+        const bucket = getUnitBucket(category, course, periodKey, studyType, false);
         const list = bucket && bucket.units[unitName] && bucket.units[unitName].chapters[chapterName];
         let removedCount = 0;
         if (Array.isArray(list)) {
@@ -704,158 +811,45 @@ app.post('/webhook', async (req, res) => {
           parse_mode: "HTML"
         });
       }
-      // ADMIN ONLY: /set_admit_link Category | Stream | Label | URL
       else if (text.startsWith('/set_admit_link')) {
-        if (!isAdmin(from.id)) {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, { chat_id: chatId, text: "⛔ Sirf Admin hi link set kar sakta hai." });
-          return;
-        }
-        const payload = text.replace('/set_admit_link', '').trim();
-        const parts = payload.split('|').map((s) => s.trim());
-        if (parts.length < 4) return;
-        const [category, stream, label, url] = parts;
-        const key = `${category}::${stream}`;
+        if (!isAdmin(from.id)) return;
+        const [category, course, label, url] = text.replace('/set_admit_link', '').trim().split('|').map((s) => s.trim());
+        if (!category || !course || !label || !url) return;
+        const key = `${category}::${course}`;
         if (!studyDb.links.admitCards[key]) studyDb.links.admitCards[key] = [];
         studyDb.links.admitCards[key].push({ label, url });
         saveData();
-        await axios.post(`${TELEGRAM_API}/sendMessage`, {
-          chat_id: chatId,
-          text: `✅ Admit Card link added for <b>${category} (${stream})</b>`,
-          parse_mode: "HTML"
-        });
+        await axios.post(`${TELEGRAM_API}/sendMessage`, { chat_id: chatId, text: "✅ Admit Card link added!" });
       }
-      // ADMIN ONLY: /remove_admit_link Category | Stream | Label
       else if (text.startsWith('/remove_admit_link')) {
-        if (!isAdmin(from.id)) {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, { chat_id: chatId, text: "⛔ Sirf Admin hi link remove kar sakta hai." });
-          return;
+        if (!isAdmin(from.id)) return;
+        const [category, course, label] = text.replace('/remove_admit_link', '').trim().split('|').map((s) => s.trim());
+        const key = `${category}::${course}`;
+        if (studyDb.links.admitCards[key]) {
+          studyDb.links.admitCards[key] = studyDb.links.admitCards[key].filter((item) => item.label !== label);
+          saveData();
         }
-        const payload = text.replace('/remove_admit_link', '').trim();
-        const parts = payload.split('|').map((s) => s.trim());
-        if (parts.length < 3) {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, {
-            chat_id: chatId,
-            text: "⚠️ Use: <code>/remove_admit_link Category | Stream | Label</code>",
-            parse_mode: "HTML"
-          });
-          return;
-        }
-        const [category, stream, label] = parts;
-        const key = `${category}::${stream}`;
-        const list = studyDb.links.admitCards[key] || [];
-        const beforeLen = list.length;
-        studyDb.links.admitCards[key] = list.filter((item) => item.label !== label);
-        const removed = beforeLen - studyDb.links.admitCards[key].length;
-        if (removed > 0) saveData();
-        await axios.post(`${TELEGRAM_API}/sendMessage`, {
-          chat_id: chatId,
-          text: removed > 0
-            ? `🗑️ Removed Admit Card link <b>${label}</b>.`
-            : `⚠️ Admit Card link <b>${label}</b> nahi mila.`,
-          parse_mode: "HTML"
-        });
+        await axios.post(`${TELEGRAM_API}/sendMessage`, { chat_id: chatId, text: "🗑️ Admit Card link removed!" });
       }
-      // ADMIN ONLY: /set_result_link Category | Stream | Label | URL
       else if (text.startsWith('/set_result_link')) {
-        if (!isAdmin(from.id)) {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, { chat_id: chatId, text: "⛔ Sirf Admin hi link set kar sakta hai." });
-          return;
-        }
-        const payload = text.replace('/set_result_link', '').trim();
-        const parts = payload.split('|').map((s) => s.trim());
-        if (parts.length < 4) return;
-        const [category, stream, label, url] = parts;
-        const key = `${category}::${stream}`;
+        if (!isAdmin(from.id)) return;
+        const [category, course, label, url] = text.replace('/set_result_link', '').trim().split('|').map((s) => s.trim());
+        if (!category || !course || !label || !url) return;
+        const key = `${category}::${course}`;
         if (!studyDb.links.results[key]) studyDb.links.results[key] = [];
         studyDb.links.results[key].push({ label, url });
         saveData();
-        await axios.post(`${TELEGRAM_API}/sendMessage`, {
-          chat_id: chatId,
-          text: `✅ Admit Card link added for <b>${category} (${stream})</b>`,
-          parse_mode: "HTML"
-        });
+        await axios.post(`${TELEGRAM_API}/sendMessage`, { chat_id: chatId, text: "✅ Result link added!" });
       }
-      // ADMIN ONLY: /remove_admit_link Category | Stream | Label
-      else if (text.startsWith('/remove_admit_link')) {
-        if (!isAdmin(from.id)) {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, { chat_id: chatId, text: "⛔ Sirf Admin hi link remove kar sakta hai." });
-          return;
-        }
-        const payload = text.replace('/remove_admit_link', '').trim();
-        const parts = payload.split('|').map((s) => s.trim());
-        if (parts.length < 3) {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, {
-            chat_id: chatId,
-            text: "⚠️ Use: <code>/remove_admit_link Category | Stream | Label</code>",
-            parse_mode: "HTML"
-          });
-          return;
-        }
-        const [category, stream, label] = parts;
-        const key = `${category}::${stream}`;
-        const list = studyDb.links.admitCards[key] || [];
-        const beforeLen = list.length;
-        studyDb.links.admitCards[key] = list.filter((item) => item.label !== label);
-        const removed = beforeLen - studyDb.links.admitCards[key].length;
-        if (removed > 0) saveData();
-        await axios.post(`${TELEGRAM_API}/sendMessage`, {
-          chat_id: chatId,
-          text: removed > 0
-            ? `🗑️ Removed Admit Card link <b>${label}</b>.`
-            : `⚠️ Admit Card link <b>${label}</b> nahi mila.`,
-          parse_mode: "HTML"
-        });
-      }
-      // ADMIN ONLY: /set_result_link Category | Stream | Label | URL
-      else if (text.startsWith('/set_result_link')) {
-        if (!isAdmin(from.id)) {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, { chat_id: chatId, text: "⛔ Sirf Admin hi link set kar sakta hai." });
-          return;
-        }
-        const payload = text.replace('/set_result_link', '').trim();
-        const parts = payload.split('|').map((s) => s.trim());
-        if (parts.length < 4) return;
-        const [category, stream, label, url] = parts;
-        const key = `${category}::${stream}`;
-        if (!studyDb.links.results[key]) studyDb.links.results[key] = [];
-        studyDb.links.results[key].push({ label, url });
-        saveData();
-        await axios.post(`${TELEGRAM_API}/sendMessage`, {
-          chat_id: chatId,
-          text: `✅ Result link added for <b>${category} (${stream})</b>`,
-          parse_mode: "HTML"
-        });
-      }
-      // ADMIN ONLY: /remove_result_link Category | Stream | Label
       else if (text.startsWith('/remove_result_link')) {
-        if (!isAdmin(from.id)) {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, { chat_id: chatId, text: "⛔ Sirf Admin hi link remove kar sakta hai." });
-          return;
+        if (!isAdmin(from.id)) return;
+        const [category, course, label] = text.replace('/remove_result_link', '').trim().split('|').map((s) => s.trim());
+        const key = `${category}::${course}`;
+        if (studyDb.links.results[key]) {
+          studyDb.links.results[key] = studyDb.links.results[key].filter((item) => item.label !== label);
+          saveData();
         }
-        const payload = text.replace('/remove_result_link', '').trim();
-        const parts = payload.split('|').map((s) => s.trim());
-        if (parts.length < 3) {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, {
-            chat_id: chatId,
-            text: "⚠️ Use: <code>/remove_result_link Category | Stream | Label</code>",
-            parse_mode: "HTML"
-          });
-          return;
-        }
-        const [category, stream, label] = parts;
-        const key = `${category}::${stream}`;
-        const list = studyDb.links.results[key] || [];
-        const beforeLen = list.length;
-        studyDb.links.results[key] = list.filter((item) => item.label !== label);
-        const removed = beforeLen - studyDb.links.results[key].length;
-        if (removed > 0) saveData();
-        await axios.post(`${TELEGRAM_API}/sendMessage`, {
-          chat_id: chatId,
-          text: removed > 0
-            ? `🗑️ Removed Result link <b>${label}</b>.`
-            : `⚠️ Result link <b>${label}</b> nahi mila.`,
-          parse_mode: "HTML"
-        });
+        await axios.post(`${TELEGRAM_API}/sendMessage`, { chat_id: chatId, text: "🗑️ Result link removed!" });
       }
       else if (text.startsWith('/addupdate')) {
         if (!isAdmin(from.id)) return;
@@ -903,6 +897,7 @@ app.post('/webhook', async (req, res) => {
           reply_markup: menu.reply_markup
         });
       }
+      // Step 1: Study Type (e.g., Syllabus) -> Show Categories
       else if (data.startsWith("type_")) {
         const idx = parseInt(data.replace("type_", ""), 10);
         const typeName =
@@ -916,6 +911,7 @@ app.post('/webhook', async (req, res) => {
         user.selectedType = typeName;
         user.selectedCategory = null;
         user.selectedStream = null;
+        user.selectedYear = null;
         user.selectedSemester = null;
         saveData();
 
@@ -927,62 +923,66 @@ app.post('/webhook', async (req, res) => {
 
         await axios.post(`${TELEGRAM_API}/sendMessage`, {
           chat_id: chatId,
-          text: `📚 <b>${typeName.toUpperCase()}</b>\n\nApni category chunein:`,
+          text: `📚 <b>${typeName.toUpperCase()}</b>\n\nCategory chunein:`,
           parse_mode: "HTML",
           reply_markup: { inline_keyboard: catButtons }
         });
       }
+      // Step 2: Category -> Show Courses
       else if (data.startsWith("cat_")) {
         const cIdx = parseInt(data.replace("cat_", ""), 10);
         const catName = CATEGORY_LIST[cIdx];
-        const streams = CATEGORIES[catName] || [];
+        const courses = CATEGORIES[catName] || [];
         user.selectedCategory = catName;
         user.selectedStream = null;
+        user.selectedYear = null;
         user.selectedSemester = null;
         saveData();
 
         await deletePrevMessage();
-        const streamButtons = streams.map((streamName, sIdx) => [
-          { text: `📘 ${streamName}`, callback_data: `str_${cIdx}_${sIdx}` }
+        const courseButtons = courses.map((courseName, sIdx) => [
+          { text: `📘 ${courseName}`, callback_data: `str_${cIdx}_${sIdx}` }
         ]);
-        streamButtons.push([{ text: "🔙 Main Menu", callback_data: "main_menu" }]);
+        courseButtons.push([{ text: "🔙 Main Menu", callback_data: "main_menu" }]);
 
         await axios.post(`${TELEGRAM_API}/sendMessage`, {
           chat_id: chatId,
-          text: `⚡ <b>${catName.toUpperCase()} — ${user.selectedType}</b>\n\nApna stream / group chunein:`,
+          text: `⚡ <b>${catName.toUpperCase()} — ${user.selectedType}</b>\n\nApna <b>Course</b> chunein:`,
           parse_mode: "HTML",
-          reply_markup: { inline_keyboard: streamButtons }
+          reply_markup: { inline_keyboard: courseButtons }
         });
       }
+      // Step 3: Course selected -> If Years exist, show Years; otherwise show Semesters directly
       else if (data.startsWith("str_")) {
         const [, cIdxStr, sIdxStr] = data.split("_");
         const cIdx = parseInt(cIdxStr, 10);
         const sIdx = parseInt(sIdxStr, 10);
         const catName = CATEGORY_LIST[cIdx];
-        const streamName = (CATEGORIES[catName] || [])[sIdx];
+        const courseName = (CATEGORIES[catName] || [])[sIdx];
         const studyType = user.selectedType || "Syllabus";
 
         user.selectedCategory = catName;
-        user.selectedStream = streamName;
+        user.selectedStream = courseName;
+        user.selectedYear = null;
         user.selectedSemester = null;
         saveData();
 
         await deletePrevMessage();
 
         if (studyType === "Admit Cards Link" || studyType === "Result Link") {
-          const key = `${catName}::${streamName}`;
+          const key = `${catName}::${courseName}`;
           const list =
             studyType === "Admit Cards Link"
               ? (studyDb.links.admitCards[key] || [])
               : (studyDb.links.results[key] || []);
           const body =
             list.length === 0
-              ? `Abhi is stream ka ${studyType} update nahi hua hai.`
+              ? `Abhi is course ka ${studyType} update nahi hua hai.`
               : list.map((l, i) => `${i + 1}. <a href="${l.url}">${l.label}</a>`).join("\n");
 
           await axios.post(`${TELEGRAM_API}/sendMessage`, {
             chat_id: chatId,
-            text: `🔗 <b>${studyType} — ${catName} (${streamName})</b>\n\n${body}`,
+            text: `🔗 <b>${studyType} — ${catName} (${courseName})</b>\n\n${body}`,
             parse_mode: "HTML",
             disable_web_page_preview: true,
             reply_markup: {
@@ -995,33 +995,90 @@ app.post('/webhook', async (req, res) => {
           return;
         }
 
-        const semesters = getSemestersForStream(catName, streamName);
-        const semButtons = semesters.map((semName, semIdx) => [
-          { text: `🗓️ ${semName}`, callback_data: `sem_${cIdx}_${sIdx}_${semIdx}` }
+        const years = getYearsForCourse(catName, courseName);
+
+        // Agar Years available hain (jaise B.Pharma / D.Pharma): pehle Years dikhayein
+        if (years.length > 0) {
+          const yearButtons = years.map((yrName, yIdx) => [
+            { text: `📅 ${yrName}`, callback_data: `yr_${cIdx}_${sIdx}_${yIdx}` }
+          ]);
+          yearButtons.push([{ text: "🔙 Main Menu", callback_data: "main_menu" }]);
+
+          await axios.post(`${TELEGRAM_API}/sendMessage`, {
+            chat_id: chatId,
+            text: `🎓 <b>${courseName} — ${studyType}</b>\n\nApna <b>Year</b> chunein:`,
+            parse_mode: "HTML",
+            reply_markup: { inline_keyboard: yearButtons }
+          });
+          return;
+        }
+
+        // Agar Years nahi hain: seedha Semesters dikhayein
+        const sems = getSemestersForCourse(catName, courseName, null);
+        const semButtons = sems.map((semName, semIdx) => [
+          { text: `🗓️ ${semName}`, callback_data: `sem_${cIdx}_${sIdx}_n_${semIdx}` }
         ]);
         semButtons.push([{ text: "🔙 Main Menu", callback_data: "main_menu" }]);
 
         await axios.post(`${TELEGRAM_API}/sendMessage`, {
           chat_id: chatId,
-          text: `🎓 <b>${catName} — ${streamName}</b>\n📚 Module: <b>${studyType}</b>\n\nApna <b>Semester</b> chunein:`,
+          text: `🎓 <b>${courseName} — ${studyType}</b>\n\nApna <b>Semester</b> chunein:`,
           parse_mode: "HTML",
           reply_markup: { inline_keyboard: semButtons }
         });
       }
+      // Step 3B: Year selected -> Show Semesters inside that Year
+      else if (data.startsWith("yr_")) {
+        const [, cIdxStr, sIdxStr, yIdxStr] = data.split("_");
+        const cIdx = parseInt(cIdxStr, 10);
+        const sIdx = parseInt(sIdxStr, 10);
+        const yIdx = parseInt(yIdxStr, 10);
+
+        const catName = CATEGORY_LIST[cIdx];
+        const courseName = CATEGORIES[catName][sIdx];
+        const years = getYearsForCourse(catName, courseName);
+        const yearName = years[yIdx];
+        const studyType = user.selectedType || "Syllabus";
+
+        user.selectedCategory = catName;
+        user.selectedStream = courseName;
+        user.selectedYear = yearName;
+        user.selectedSemester = null;
+        saveData();
+
+        await deletePrevMessage();
+
+        const sems = getSemestersForCourse(catName, courseName, yearName);
+        const semButtons = sems.map((semName, semIdx) => [
+          { text: `🗓️ ${semName}`, callback_data: `sem_${cIdx}_${sIdx}_${yIdx}_${semIdx}` }
+        ]);
+        semButtons.push([{ text: "🔙 Main Menu", callback_data: "main_menu" }]);
+
+        await axios.post(`${TELEGRAM_API}/sendMessage`, {
+          chat_id: chatId,
+          text: `🎓 <b>${courseName} — ${yearName}</b>\n📚 Module: <b>${studyType}</b>\n\nApna <b>Semester</b> chunein:`,
+          parse_mode: "HTML",
+          reply_markup: { inline_keyboard: semButtons }
+        });
+      }
+      // Step 4: Semester selected -> Show Syllabus / Units inside that Semester
       else if (data.startsWith("sem_")) {
-        const [, cIdxStr, sIdxStr, semIdxStr] = data.split("_");
+        const [, cIdxStr, sIdxStr, yPart, semIdxStr] = data.split("_");
         const cIdx = parseInt(cIdxStr, 10);
         const sIdx = parseInt(sIdxStr, 10);
         const semIdx = parseInt(semIdxStr, 10);
 
         const catName = CATEGORY_LIST[cIdx];
-        const streamName = (CATEGORIES[catName] || [])[sIdx];
-        const semesters = getSemestersForStream(catName, streamName);
-        const semName = semesters[semIdx];
-        const studyType = user.selectedType || "Hand Written Notes";
+        const courseName = CATEGORIES[catName][sIdx];
+        const yearName = yPart === "n" ? null : getYearsForCourse(catName, courseName)[parseInt(yPart, 10)];
+        const sems = getSemestersForCourse(catName, courseName, yearName);
+        const semName = sems[semIdx];
+        const studyType = user.selectedType || "Syllabus";
+        const periodKey = buildPeriodStorageKey(yearName, semName);
 
         user.selectedCategory = catName;
-        user.selectedStream = streamName;
+        user.selectedStream = courseName;
+        user.selectedYear = yearName;
         user.selectedSemester = semName;
         saveData();
 
@@ -1030,7 +1087,7 @@ app.post('/webhook', async (req, res) => {
         if (studyType === "AI Assistant") {
           await axios.post(`${TELEGRAM_API}/sendMessage`, {
             chat_id: chatId,
-            text: `🤖 <b>AI Assistant Ready</b>\n\nScope: <b>${catName} > ${streamName} > ${semName}</b>\nApna topic ya question abhi type karke bhejein!`,
+            text: `🤖 <b>AI Assistant Ready</b>\n\nScope: <b>${courseName} > ${periodKey}</b>\nApna topic ya question abhi type karke bhejein!`,
             parse_mode: "HTML",
             reply_markup: {
               inline_keyboard: [[{ text: "🔙 Main Menu", callback_data: "main_menu" }]]
@@ -1040,13 +1097,13 @@ app.post('/webhook', async (req, res) => {
         }
 
         const tIdx = ALLOWED_STUDY_TYPES.indexOf(studyType);
-        const bucket = getUnitBucket(catName, streamName, semName, studyType, false);
+        const bucket = getUnitBucket(catName, courseName, periodKey, studyType, false);
         const units = bucket ? Object.keys(bucket.units) : [];
 
         if (units.length === 0) {
           await axios.post(`${TELEGRAM_API}/sendMessage`, {
             chat_id: chatId,
-            text: `📂 <b>${catName} > ${streamName} > ${semName} > ${studyType}</b>\n\nIs semester mein abhi koi Unit add nahi hui hai.`,
+            text: `📖 <b>${courseName} > ${periodKey} — ${studyType}</b>\n\nIs semester mein abhi koi ${studyType} unit add nahi hui hai.`,
             parse_mode: "HTML",
             reply_markup: {
               inline_keyboard: [[{ text: "🔙 Main Menu", callback_data: "main_menu" }]]
@@ -1056,19 +1113,20 @@ app.post('/webhook', async (req, res) => {
         }
 
         const unitButtons = units.map((unitName, uIdx) => [
-          { text: `📂 ${unitName}`, callback_data: `unit_${cIdx}_${sIdx}_${semIdx}_${tIdx}_${uIdx}` }
+          { text: `📂 ${unitName}`, callback_data: `unit_${cIdx}_${sIdx}_${yPart}_${semIdx}_${tIdx}_${uIdx}` }
         ]);
         unitButtons.push([{ text: "🔙 Main Menu", callback_data: "main_menu" }]);
 
         await axios.post(`${TELEGRAM_API}/sendMessage`, {
           chat_id: chatId,
-          text: `📚 <b>${studyType} — ${catName} (${streamName})</b>\n🗓️ <b>${semName}</b>\n\nUnit chunein:`,
+          text: `📖 <b>${courseName} — ${periodKey} (${studyType})</b>\n\nSyllabus Unit chunein:`,
           parse_mode: "HTML",
           reply_markup: { inline_keyboard: unitButtons }
         });
       }
+      // Step 5: Unit selected -> Show Chapters / Syllabus Topics
       else if (data.startsWith("unit_")) {
-        const [, cIdxStr, sIdxStr, semIdxStr, tIdxStr, uIdxStr] = data.split("_");
+        const [, cIdxStr, sIdxStr, yPart, semIdxStr, tIdxStr, uIdxStr] = data.split("_");
         const cIdx = parseInt(cIdxStr, 10);
         const sIdx = parseInt(sIdxStr, 10);
         const semIdx = parseInt(semIdxStr, 10);
@@ -1076,11 +1134,13 @@ app.post('/webhook', async (req, res) => {
         const uIdx = parseInt(uIdxStr, 10);
 
         const catName = CATEGORY_LIST[cIdx];
-        const streamName = CATEGORIES[catName][sIdx];
-        const semName = getSemestersForStream(catName, streamName)[semIdx];
+        const courseName = CATEGORIES[catName][sIdx];
+        const yearName = yPart === "n" ? null : getYearsForCourse(catName, courseName)[parseInt(yPart, 10)];
+        const semName = getSemestersForCourse(catName, courseName, yearName)[semIdx];
         const studyType = ALLOWED_STUDY_TYPES[tIdx];
+        const periodKey = buildPeriodStorageKey(yearName, semName);
 
-        const bucket = getUnitBucket(catName, streamName, semName, studyType, false);
+        const bucket = getUnitBucket(catName, courseName, periodKey, studyType, false);
         const unitName = bucket ? Object.keys(bucket.units)[uIdx] : null;
         const chapters = unitName ? Object.keys(bucket.units[unitName].chapters || {}) : [];
 
@@ -1089,7 +1149,7 @@ app.post('/webhook', async (req, res) => {
         if (chapters.length === 0) {
           await axios.post(`${TELEGRAM_API}/sendMessage`, {
             chat_id: chatId,
-            text: `📂 <b>${unitName || "Unit"}</b> (${semName})\n\nIs unit mein abhi koi Notes / Syllabus / Chapter add nahi hua hai.`,
+            text: `📂 <b>${unitName || "Unit"}</b> (${periodKey})\n\nIs unit mein abhi koi syllabus topic / chapter add nahi hua hai.`,
             parse_mode: "HTML",
             reply_markup: {
               inline_keyboard: [[{ text: "🔙 Main Menu", callback_data: "main_menu" }]]
@@ -1099,19 +1159,20 @@ app.post('/webhook', async (req, res) => {
         }
 
         const chapButtons = chapters.map((chapName, chIdx) => [
-          { text: `📝 ${chapName}`, callback_data: `chap_${cIdx}_${sIdx}_${semIdx}_${tIdx}_${uIdx}_${chIdx}` }
+          { text: `📝 ${chapName}`, callback_data: `chap_${cIdx}_${sIdx}_${yPart}_${semIdx}_${tIdx}_${uIdx}_${chIdx}` }
         ]);
         chapButtons.push([{ text: "🔙 Main Menu", callback_data: "main_menu" }]);
 
         await axios.post(`${TELEGRAM_API}/sendMessage`, {
           chat_id: chatId,
-          text: `📂 <b>${unitName}</b> (${semName} — ${studyType})\n\nNotes / Syllabus / Chapter chunein:`,
+          text: `📂 <b>${unitName}</b> (${periodKey} — ${studyType})\n\nTopic / Syllabus Section chunein:`,
           parse_mode: "HTML",
           reply_markup: { inline_keyboard: chapButtons }
         });
       }
+      // Step 6: Chapter selected -> Show PDFs
       else if (data.startsWith("chap_")) {
-        const [, cIdxStr, sIdxStr, semIdxStr, tIdxStr, uIdxStr, chIdxStr] = data.split("_");
+        const [, cIdxStr, sIdxStr, yPart, semIdxStr, tIdxStr, uIdxStr, chIdxStr] = data.split("_");
         const cIdx = parseInt(cIdxStr, 10);
         const sIdx = parseInt(sIdxStr, 10);
         const semIdx = parseInt(semIdxStr, 10);
@@ -1120,11 +1181,13 @@ app.post('/webhook', async (req, res) => {
         const chIdx = parseInt(chIdxStr, 10);
 
         const catName = CATEGORY_LIST[cIdx];
-        const streamName = CATEGORIES[catName][sIdx];
-        const semName = getSemestersForStream(catName, streamName)[semIdx];
+        const courseName = CATEGORIES[catName][sIdx];
+        const yearName = yPart === "n" ? null : getYearsForCourse(catName, courseName)[parseInt(yPart, 10)];
+        const semName = getSemestersForCourse(catName, courseName, yearName)[semIdx];
         const studyType = ALLOWED_STUDY_TYPES[tIdx];
+        const periodKey = buildPeriodStorageKey(yearName, semName);
 
-        const bucket = getUnitBucket(catName, streamName, semName, studyType, false);
+        const bucket = getUnitBucket(catName, courseName, periodKey, studyType, false);
         const unitName = bucket ? Object.keys(bucket.units)[uIdx] : null;
         const chapterName = unitName ? Object.keys(bucket.units[unitName].chapters)[chIdx] : null;
         const pdfs = chapterName ? (bucket.units[unitName].chapters[chapterName] || []) : [];
@@ -1144,19 +1207,20 @@ app.post('/webhook', async (req, res) => {
         }
 
         const pdfButtons = pdfs.map((pdf, pIdx) => [
-          { text: `📄 ${pdf.title}`, callback_data: `pdf_${cIdx}_${sIdx}_${semIdx}_${tIdx}_${uIdx}_${chIdx}_${pIdx}` }
+          { text: `📄 ${pdf.title}`, callback_data: `pdf_${cIdx}_${sIdx}_${yPart}_${semIdx}_${tIdx}_${uIdx}_${chIdx}_${pIdx}` }
         ]);
         pdfButtons.push([{ text: "🔙 Main Menu", callback_data: "main_menu" }]);
 
         await axios.post(`${TELEGRAM_API}/sendMessage`, {
           chat_id: chatId,
-          text: `📝 <b>${chapterName}</b> (${semName})\n\nPDF open / download karne ke liye tap karein:`,
+          text: `📝 <b>${chapterName}</b> (${periodKey})\n\nPDF open / download karne ke liye tap karein:`,
           parse_mode: "HTML",
           reply_markup: { inline_keyboard: pdfButtons }
         });
       }
+      // Step 7: Send PDF Document
       else if (data.startsWith("pdf_")) {
-        const [, cIdxStr, sIdxStr, semIdxStr, tIdxStr, uIdxStr, chIdxStr, pIdxStr] = data.split("_");
+        const [, cIdxStr, sIdxStr, yPart, semIdxStr, tIdxStr, uIdxStr, chIdxStr, pIdxStr] = data.split("_");
         const cIdx = parseInt(cIdxStr, 10);
         const sIdx = parseInt(sIdxStr, 10);
         const semIdx = parseInt(semIdxStr, 10);
@@ -1166,11 +1230,13 @@ app.post('/webhook', async (req, res) => {
         const pIdx = parseInt(pIdxStr, 10);
 
         const catName = CATEGORY_LIST[cIdx];
-        const streamName = CATEGORIES[catName][sIdx];
-        const semName = getSemestersForStream(catName, streamName)[semIdx];
+        const courseName = CATEGORIES[catName][sIdx];
+        const yearName = yPart === "n" ? null : getYearsForCourse(catName, courseName)[parseInt(yPart, 10)];
+        const semName = getSemestersForCourse(catName, courseName, yearName)[semIdx];
         const studyType = ALLOWED_STUDY_TYPES[tIdx];
+        const periodKey = buildPeriodStorageKey(yearName, semName);
 
-        const bucket = getUnitBucket(catName, streamName, semName, studyType, false);
+        const bucket = getUnitBucket(catName, courseName, periodKey, studyType, false);
         const unitName = Object.keys(bucket.units)[uIdx];
         const chapterName = Object.keys(bucket.units[unitName].chapters)[chIdx];
         const pdf = bucket.units[unitName].chapters[chapterName][pIdx];
@@ -1179,7 +1245,7 @@ app.post('/webhook', async (req, res) => {
           await axios.post(`${TELEGRAM_API}/sendDocument`, {
             chat_id: chatId,
             document: pdf.fileId,
-            caption: `📄 <b>${pdf.title}</b>\n${catName} > ${streamName} > ${semName} > ${studyType}\nUnit: ${unitName} | Topic: ${chapterName}`,
+            caption: `📄 <b>${pdf.title}</b>\n${catName} > ${courseName} > ${periodKey} > ${studyType}\nUnit: ${unitName} | Topic: ${chapterName}`,
             parse_mode: "HTML"
           });
         }
