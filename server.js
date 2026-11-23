@@ -257,6 +257,48 @@ function getSemestersForCourse(category, course, yearName = null) {
 
   return merged;
 }
+axios.interceptors.request.use((request) => {
+  try {
+    const data = request.data;
+    if (
+      data &&
+      typeof data === "object" &&
+      data.reply_markup &&
+      Array.isArray(data.reply_markup.inline_keyboard)
+    ) {
+      data.reply_markup.inline_keyboard =
+        data.reply_markup.inline_keyboard.map((row) =>
+          row.map((button) => {
+            const text = button.text || "";
+            const callback = button.callback_data || "";
+            let style = "success";
+
+            if (
+              text.includes("Syllabus") ||
+              text.includes("Hand Written Notes") ||
+              text.includes("Year") ||
+              text.includes("Semester")
+            ) {
+              style = "primary";
+            } else if (text.includes("Back") || text.includes("Main Menu")) {
+              style = "danger";
+            } else if (
+              callback.startsWith("yr_") ||
+              callback.startsWith("sem_") ||
+              callback.startsWith("subj_")
+            ) {
+              style = "success";
+            }
+
+            return { ...button, style };
+          })
+        );
+    }
+  } catch (error) {
+    console.log("Button color error:", error.message);
+  }
+  return request;
+});
 
 function buildPeriodStorageKey(yearName, semesterName) {
   return yearName ? `${yearName} >${semesterName}` : semesterName;
