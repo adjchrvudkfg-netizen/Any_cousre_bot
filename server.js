@@ -1023,6 +1023,11 @@ app.post('/webhook', async (req, res) => {
 
         notesUnit.pdfs.push(pdfMeta);
 
+        const effectiveTextForGeneration =
+          extractedText.length > 0
+            ? extractedText
+            : `${flow.subjectName} ${flow.unitName} ${pdfTitle}. Key definitions, scope, classification, mechanism, preparation, evaluation, and important exam points of ${flow.subjectName} ${flow.unitName}.`;
+
         if (extractedText.length > 0) {
           const structuredSection = buildStructuredNotesText(
             extractedText,
@@ -1032,47 +1037,6 @@ app.post('/webhook', async (req, res) => {
           notesUnit.handwrittenNotes = notesUnit.handwrittenNotes
             ? `${notesUnit.handwrittenNotes}\n\n${structuredSection}`
             : structuredSection;
-
-          const generated = generateStudyMaterialsFromPdfText(
-            extractedText,
-            flow.subjectName,
-            flow.unitName
-          );
-
-          const pyqUnit = ensureUnitRecord(
-            flow.category,
-            flow.course,
-            flow.periodKey,
-            "PYQ Question",
-            flow.subjectName,
-            flow.unitName,
-            true
-          );
-          pyqUnit.pdfs.push(pdfMeta);
-          pyqUnit.pyqStructured = {
-            mcq: [...(pyqUnit.pyqStructured.mcq || []), ...generated.pyqStructured.mcq],
-            short: [...(pyqUnit.pyqStructured.short || []), ...generated.pyqStructured.short],
-            long: [...(pyqUnit.pyqStructured.long || []), ...generated.pyqStructured.long]
-          };
-          pyqUnit.pyqQuestions = [
-            ...pyqUnit.pyqStructured.mcq.map((q) => `${q.question} — ${q.answer}`),
-            ...pyqUnit.pyqStructured.short.map((q) => `${q.question} — ${q.answer}`),
-            ...pyqUnit.pyqStructured.long.map((q) => `${q.question} — ${q.answer}`)
-          ];
-
-          const mockUnit = ensureUnitRecord(
-            flow.category,
-            flow.course,
-            flow.periodKey,
-            "Mock Test",
-            flow.subjectName,
-            flow.unitName,
-            true
-          );
-          mockUnit.pdfs.push(pdfMeta);
-          const combinedMock = [...(mockUnit.mockMcqSet || []), ...generated.mockMcqSet].slice(0, 20);
-          mockUnit.mockMcqSet = combinedMock;
-          mockUnit.mockQuestions = combinedMock.map((q) => q.question);
         } else if (!notesUnit.handwrittenNotes) {
           notesUnit.handwrittenNotes = buildStructuredNotesText(
             `${pdfTitle} (${doc.file_name || "PDF"}) uploaded (${fileSizeMb} MB).`,
@@ -1080,6 +1044,47 @@ app.post('/webhook', async (req, res) => {
             flow.subjectName
           );
         }
+
+        const generated = generateStudyMaterialsFromPdfText(
+          effectiveTextForGeneration,
+          flow.subjectName,
+          flow.unitName
+        );
+
+        const pyqUnit = ensureUnitRecord(
+          flow.category,
+          flow.course,
+          flow.periodKey,
+          "PYQ Question",
+          flow.subjectName,
+          flow.unitName,
+          true
+        );
+        pyqUnit.pdfs.push(pdfMeta);
+        pyqUnit.pyqStructured = {
+          mcq: [...(pyqUnit.pyqStructured.mcq || []), ...generated.pyqStructured.mcq],
+          short: [...(pyqUnit.pyqStructured.short || []), ...generated.pyqStructured.short],
+          long: [...(pyqUnit.pyqStructured.long || []), ...generated.pyqStructured.long]
+        };
+        pyqUnit.pyqQuestions = [
+          ...pyqUnit.pyqStructured.mcq.map((q) => `${q.question} — ${q.answer}`),
+          ...pyqUnit.pyqStructured.short.map((q) => `${q.question} — ${q.answer}`),
+          ...pyqUnit.pyqStructured.long.map((q) => `${q.question} — ${q.answer}`)
+        ];
+
+        const mockUnit = ensureUnitRecord(
+          flow.category,
+          flow.course,
+          flow.periodKey,
+          "Mock Test",
+          flow.subjectName,
+          flow.unitName,
+          true
+        );
+        mockUnit.pdfs.push(pdfMeta);
+        const combinedMock = [...(mockUnit.mockMcqSet || []), ...generated.mockMcqSet].slice(0, 20);
+        mockUnit.mockMcqSet = combinedMock;
+        mockUnit.mockQuestions = combinedMock.map((q) => q.question);
 
         persistAll();
 
@@ -1094,6 +1099,11 @@ app.post('/webhook', async (req, res) => {
 📘 <b>Subject:</b> ${escapeHtml(flow.subjectName)}
 📂 <b>Unit:</b> ${escapeHtml(flow.unitName)}
 📝 <b>Status:</b> ${escapeHtml(downloadNote)} (${extractedText.length} chars)
+
+<b>Updated Automatically:</b>
+✍️ Hand Written Notes: Ready
+📝 PYQ Questions: ${pyqUnit.pyqStructured.mcq.length} MCQ | ${pyqUnit.pyqStructured.short.length} Short | ${pyqUnit.pyqStructured.long.length} Long
+🎯 Mock Test: ${mockUnit.mockMcqSet.length} Questions Set Ready
 
 <i>Aap is unit mein aur PDFs ya photos bhi bhej sakte hain.</i>`,
           parse_mode: "HTML"
