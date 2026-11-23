@@ -2,6 +2,7 @@ const express = require('express');
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
+const pdfParse = require('pdf-parse');
 const config = require('./config');
 
 const app = express();
@@ -95,8 +96,21 @@ const DEFAULT_DIRECT_SEMESTERS_BY_COURSE = {
 };
 
 let studyDb = {
-  // Structure: materials[category][course][periodKey][studyType][unitName] = { chapters: { [chapterName]: [pdfObj] } }
+  // materials[category][course][periodKey][studyType][subjectName] = {
+  //   units: {
+  //     [unitName]: {
+  //       topics: [string],
+  //       handwrittenNotes: string,
+  //       pyqQuestions: [string],
+  //       mcqQuestions: [string],
+  //       mockQuestions: [string],
+  //       revisionNotes: string
+  //     }
+  //   }
+  // }
   materials: {},
+  // uploadedPdfs: admin ke through upload ki gayi sabhi PDFs ka text & metadata
+  uploadedPdfs: [],
   customYears: {},
   customSemesters: {},
   links: {
@@ -109,11 +123,9 @@ let studyDb = {
 // =====================================
 // AUTOMATIC BUTTON COLOR SYSTEM
 // =====================================
-
 axios.interceptors.request.use((request) => {
   try {
     const data = request.data;
-
     if (
       data &&
       typeof data === "object" &&
@@ -127,11 +139,16 @@ axios.interceptors.request.use((request) => {
             const callback = button.callback_data || "";
             let style = "success";
 
-            if (text.includes("Syllabus") || text.includes("Hand Written Notes") || text.includes("Year") || text.includes("Semester")) {
+            if (
+              text.includes("Syllabus") ||
+              text.includes("Hand Written Notes") ||
+              text.includes("Year") ||
+              text.includes("Semester")
+            ) {
               style = "primary";
             } else if (text.includes("Back") || text.includes("Main Menu")) {
               style = "danger";
-            } else if (callback.startsWith("yr_") || callback.startsWith("sem_") || callback.startsWith("unit_")) {
+            } else if (callback.startsWith("yr_") || callback.startsWith("sem_") || callback.startsWith("subj_")) {
               style = "success";
             }
 
@@ -142,7 +159,6 @@ axios.interceptors.request.use((request) => {
   } catch (error) {
     console.log("Button color error:", error.message);
   }
-
   return request;
 });
 
@@ -160,6 +176,7 @@ try {
     if (raw && raw.trim().length > 0) {
       const parsed = JSON.parse(raw);
       if (parsed.materials) studyDb.materials = parsed.materials;
+      if (parsed.uploadedPdfs) studyDb.uploadedPdfs = parsed.uploadedPdfs;
       if (parsed.customYears) studyDb.customYears = parsed.customYears;
       if (parsed.customSemesters) studyDb.customSemesters = parsed.customSemesters;
       if (parsed.links) {
@@ -206,11 +223,9 @@ function getYearsForCourse(category, course) {
   const baseYears = DEFAULT_YEARS_BY_COURSE[course] || [];
   const extraYears = studyDb.customYears[key] || [];
   const merged = [...baseYears];
-
   for (const yr of extraYears) {
     if (!merged.includes(yr)) merged.push(yr);
   }
-
   return merged;
 }
 
@@ -231,8 +246,7 @@ function getSemestersForCourse(category, course, yearName = null) {
   const extraSems = studyDb.customSemesters[key] || [];
   const merged = [...baseSems];
 
-  const storagePeriodKey = yearName ? `${yearName} > ...` : null;
-  if (!storagePeriodKey && studyDb.materials[category] && studyDb.materials[category][course]) {
+  if (!yearName && studyDb.materials[category] && studyDb.materials[category][course]) {
     for (const semKey of Object.keys(studyDb.materials[category][course])) {
       if (!semKey.includes(" > ") && !merged.includes(semKey)) {
         merged.push(semKey);
@@ -259,7 +273,7 @@ function buildPeriodStorageKey(yearName, semesterName) {
   return yearName ? `${yearName} > ${semesterName}` : semesterName;
 }
 
-function ensurePeriod(category, course, periodKey, createIfMissing = false) {
+function getSubjectBucket(category, course, periodKey, studyType, createIfMissing = false) {
   if (!studyDb.materials[category]) {
     if (!createIfMissing) return null;
     studyDb.materials[category] = {};
@@ -272,21 +286,302 @@ function ensurePeriod(category, course, periodKey, createIfMissing = false) {
     if (!createIfMissing) return null;
     studyDb.materials[category][course][periodKey] = {};
   }
-  return studyDb.materials[category][course][periodKey];
+  if (!studyDb.materials[category][course][periodKey][studyType]) {
+    if (!createIfMissing) return null;
+    studyDb.materials[category][course][periodKey][studyType] = { subjects: {} };
+  }
+  if (!studyDb.materials[category][course][periodKey][studyType].subjects) {
+    studyDb.materials[category][course][periodKey][studyType].subjects = {};
+  }
+  return studyDb.materials[category][course][periodKey][studyType];
 }
 
-function getUnitBucket(category, course, periodKey, studyType, createIfMissing = false) {
-  const periodObj = ensurePeriod(category, course, periodKey, createIfMissing);
-  if (!periodObj) return null;
+function ensureUnitRecord(category, course, periodKey, studyType, subjectName, unitName, createIfMissing = false) {
+  const bucket = getSubjectBucket(category, course, periodKey, studyType, createIfMissing);
+  if (!bucket) return null;
 
-  if (!periodObj[studyType]) {
+  if (!bucket.subjects[subjectName]) {
     if (!createIfMissing) return null;
-    periodObj[studyType] = { units: {} };
+    bucket.subjects[subjectName] = { units: {} };
   }
-  if (!periodObj[studyType].units) {
-    periodObj[studyType].units = {};
+  if (!bucket.subjects[subjectName].units) {
+    bucket.subjects[subjectName].units = {};
   }
-  return periodObj[studyType];
+  if (!bucket.subjects[subjectName].units[unitName]) {
+    if (!createIfMissing) return null;
+    bucket.subjects[subjectName].units[unitName] = {
+      topics: [],
+      handwrittenNotes: "",
+      pyqQuestions: [],
+      mcqQuestions: [],
+      mockQuestions: [],
+      revisionNotes: ""
+    };
+  }
+  return bucket.subjects[subjectName].units[unitName];
+}
+
+// Language detection: 'hindi' (Devanagari), 'hinglish', or 'english'
+function detectLanguage(text) {
+  if (/[\u0900-\u097F]/.test(text)) {
+    return "hindi";
+  }
+  const lower = text.toLowerCase();
+  const hinglishWords = [
+    "kya", "hai", "hain", "kaise", "kese", "kaun", "kon", "aur", "me", "mein",
+    "se", "ko", "ki", "ke", "ka", "likhna", "samjha", "batao", "bataiye",
+    "dhoondh", "dhundh", "wala", "wali", "wale", "karna", "karein", "chahiye",
+    "hota", "hoti", "hote", "ban", "sakte", "gaye", "hue", "hui", "puchha"
+  ];
+  const tokens = lower.split(/[^a-z0-9]+/).filter(Boolean);
+  const matchCount = tokens.filter((w) => hinglishWords.includes(w)).length;
+  if (matchCount >= 1) {
+    return "hinglish";
+  }
+  return "english";
+}
+
+function buildHandwrittenText(rawText, title, lang) {
+  const cleanLines = (rawText || "")
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  const bullets = cleanLines
+    .slice(0, 14)
+    .map((line) => (line.length > 220 ? `${line.slice(0, 217)}...` : line))
+    .map((line) => `  ✍️ • ${line}`)
+    .join("\n");
+
+  if (!bullets) {
+    if (lang === "hindi") {
+      return `✍️ *हस्तलिखित नोट्स — ${title}*\n\n  ✍️ • अभी इस भाग के नोट्स अपडेट किए जा रहे हैं।`;
+    }
+    if (lang === "english") {
+      return `✍️ *Handwritten Notebook Notes — ${title}*\n\n  ✍️ • Notebook content for this section is being updated.`;
+    }
+    return `✍️ *Hand Written Notes — ${title}*\n\n  ✍️ • Is topic ke haath se likhe hue notes update kiye ja rahe hain.`;
+  }
+
+  if (lang === "hindi") {
+    return (
+`✍️ *हस्तलिखित नोट्स (Notebook Style)*
+📌 *शीर्षक:* ${title}
+──────────────────────
+${bullets}
+──────────────────────
+📝 *परीक्षा टिप:* मुख्य परिभाषा, वर्गीकरण/बिंदु और उदाहरण साफ अक्षरों में लिखें।`
+    );
+  }
+
+  if (lang === "english") {
+    return (
+`✍️ *Handwritten Notebook Notes*
+📌 *Topic:* ${title}
+──────────────────────
+${bullets}
+──────────────────────
+📝 *Exam Tip:* Highlight definitions, key points/classifications, and neat examples.`
+    );
+  }
+
+  return (
+`✍️ *Hand Written Notes (Notebook Style)*
+📌 *Topic:* ${title}
+──────────────────────
+${bullets}
+──────────────────────
+📝 *Exam Tip:* Definition, main points/classification, aur examples saaf tarike se likhein.`
+  );
+}
+
+function searchAdminPdfsForQuery(query) {
+  const qLower = (query || "").toLowerCase();
+  const keywords = qLower
+    .split(/[^a-z0-9\u0900-\u097F]+/i)
+    .filter((w) => w.length >= 2);
+
+  const matches = [];
+  for (const pdf of studyDb.uploadedPdfs || []) {
+    const text = pdf.extractedText || "";
+    const textLower = text.toLowerCase();
+    const metaStr = `${pdf.category || ""} ${pdf.course || ""} ${pdf.periodKey || ""} ${pdf.subjectName || ""} ${pdf.unitName || ""} ${pdf.title || ""}`.toLowerCase();
+
+    let score = 0;
+    if (qLower.length >= 3 && textLower.includes(qLower)) score += 10;
+    if (qLower.length >= 3 && metaStr.includes(qLower)) score += 8;
+
+    const matchedLines = [];
+    const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+
+    for (const kw of keywords) {
+      if (textLower.includes(kw)) score += 2;
+      if (metaStr.includes(kw)) score += 2;
+    }
+
+    for (const line of lines) {
+      const lLower = line.toLowerCase();
+      if (keywords.some((kw) => lLower.includes(kw))) {
+        matchedLines.push(line);
+      }
+      if (matchedLines.length >= 8) break;
+    }
+
+    if (score > 0 || matchedLines.length > 0) {
+      matches.push({
+        pdf,
+        score,
+        excerpt: matchedLines.join("\n") || lines.slice(0, 6).join("\n")
+      });
+    }
+  }
+
+  matches.sort((a, b) => b.score - a.score);
+  return matches;
+}
+
+function collectStoredQuestionsForQuery(query) {
+  const qLower = (query || "").toLowerCase();
+  const keywords = qLower
+    .split(/[^a-z0-9\u0900-\u097F]+/i)
+    .filter((w) => w.length >= 2);
+
+  const pyqs = [];
+  const mocks = [];
+
+  const traverse = (obj) => {
+    if (!obj || typeof obj !== "object") return;
+    if (Array.isArray(obj.pyqQuestions)) {
+      for (const item of obj.pyqQuestions) {
+        const s = String(item);
+        if (!keywords.length || keywords.some((k) => s.toLowerCase().includes(k)) || s.toLowerCase().includes(qLower)) {
+          pyqs.push(s);
+        }
+      }
+    }
+    if (Array.isArray(obj.mockQuestions)) {
+      for (const item of obj.mockQuestions) {
+        const s = String(item);
+        if (!keywords.length || keywords.some((k) => s.toLowerCase().includes(k)) || s.toLowerCase().includes(qLower)) {
+          mocks.push(s);
+        }
+      }
+    }
+    for (const val of Object.values(obj)) {
+      if (val && typeof val === "object") traverse(val);
+    }
+  };
+
+  traverse(studyDb.materials);
+  return { pyqs, mocks };
+}
+
+function buildSmartAiAssistantResponse(query, user) {
+  const lang = detectLanguage(query);
+  const matches = searchAdminPdfsForQuery(query);
+  const { pyqs, mocks } = collectStoredQuestionsForQuery(query);
+  const bestMatch = matches[0] || null;
+
+  const sourceLabel = bestMatch
+    ? `${bestMatch.pdf.title} (${bestMatch.pdf.subjectName || bestMatch.pdf.course || "Admin PDF"})`
+    : (studyDb.uploadedPdfs.length > 0 ? "Admin Uploaded PDFs" : "General Study Knowledge");
+
+  const handwrittenSnippet = bestMatch
+    ? buildHandwrittenText(bestMatch.excerpt, `${query} — ${sourceLabel}`, lang)
+    : buildHandwrittenText(
+        `Topic "${query}" ke main concepts ko points mein samjhein.\nKey definitions, classification/steps, aur examples par focus karein.\nAgar is topic ki PDF admin ne upload ki hai toh uske headings aur notes yahan aayenge.`,
+        query,
+        lang
+      );
+
+  const pyqSectionText = pyqs.length > 0
+    ? pyqs.slice(0, 6).map((q, i) => `  • PYQ ${i + 1}: ${q}`).join("\n")
+    : (lang === "hindi"
+        ? "  • अभी इस विषय के लिए सहेजे गए PYQ प्रश्न नहीं मिले (आप /add_pyq से जोड़ सकते हैं)।"
+        : lang === "english"
+          ? "  • No saved PYQ questions found for this exact topic yet (admins can add via /add_pyq)."
+          : "  • Is topic ke liye abhi saved PYQ questions nahi mile (admin /add_pyq se daal sakte hain).");
+
+  const mockSectionText = mocks.length > 0
+    ? mocks.slice(0, 5).map((q, i) => `  • Mock ${i + 1}: ${q}`).join("\n")
+    : (lang === "hindi"
+        ? `  • संभावित प्रश्न: "${query}" की परिभाषा, मुख्य प्रकार/विशेषताएँ और उपयोग लिखिए।`
+        : lang === "english"
+          ? `  • Practice Question: Define "${query}", explain its key types/features, and give examples.`
+          : `  • Practice Question: "${query}" ki definition, main types/features, aur examples likhein.`);
+
+  if (lang === "hindi") {
+    return (
+`🤖 *AI सहायक — हस्तलिखित शैली उत्तर*
+🔎 *खोजा गया विषय:* *${query}*
+📂 *स्रोत (PDFs में से):* ${sourceLabel} (कुल PDFs: ${studyDb.uploadedPdfs.length})
+
+${handwrittenSnippet}
+
+❓ *इस विषय से किस-किस प्रकार के प्रश्न बन सकते हैं:*
+  • *Short Answer (2–3 अंक):* परिभाषा, महत्व या संक्षिप्त अंतर।
+  • *Long / Descriptive Answer (5–10 अंक):* पूरा विवरण, वर्गीकरण, कार्यप्रणाली या चरण।
+  • *Application / Case / MCQ:* व्यावहारिक उपयोग, उदाहरण और सही विकल्प चुनने वाले प्रश्न।
+
+📌 *पहले से बने हुए प्रश्न (PYQ / Mock):*
+${pyqSectionText}
+${mockSectionText}
+
+✍️ *उत्तर कैसे लिखना चाहिए (Answer Writing Guide):*
+  1. *परिभाषा / परिचय:* 2–3 स्पष्ट पंक्तियों में विषय की शुरुआत करें।
+  2. *मुख्य बिंदु / वर्गीकरण:* बुलेट या हेडिंग के साथ व्यवस्थित बिंदु लिखें।
+  3. *उदाहरण / रेखाचित्र:* जहाँ संभव हो वहाँ उदाहरण या सरल डायग्राम/फ्लोचार्ट बनाएँ।
+  4. *निष्कर्ष:* अंत में 1–2 पंक्तियों में सारांश लिखें।`
+    );
+  }
+
+  if (lang === "english") {
+    return (
+`🤖 *AI Assistant — Handwritten Study Response*
+🔎 *Topic Queried:* *${query}*
+📂 *Source (From Admin PDFs):* ${sourceLabel} (Total PDFs: ${studyDb.uploadedPdfs.length})
+
+${handwrittenSnippet}
+
+❓ *Types of Questions That Can Be Asked:*
+  • *Short Answer (2–3 Marks):* Definitions, core terms, or concise differences.
+  • *Long / Structured Answer (5–10 Marks):* Detailed explanation, classification, mechanisms, or steps.
+  • *MCQs & Case/Application Questions:* Concept checks, real-world scenarios, and exceptions.
+
+📌 *Questions Already Available (PYQ / Mock):*
+${pyqSectionText}
+${mockSectionText}
+
+✍️ *How to Write the Answer in Exams:*
+  1. *Definition / Intro:* Start with a clear, concise definition.
+  2. *Structured Points / Classification:* Use headings or bullet points with key terms.
+  3. *Examples / Diagrams:* Add examples or a simple flow/diagram where helpful.
+  4. *Summary:* Conclude with a brief wrap-up line.`
+    );
+  }
+
+  return (
+`🤖 *AI Assistant — Hand Written Style Explanation*
+🔎 *Topic:* *${query}*
+📂 *PDF Search Source:* ${sourceLabel} (Total Admin PDFs: ${studyDb.uploadedPdfs.length})
+
+${handwrittenSnippet}
+
+❓ *Kis-Kis Type Ke Questions Ban Sakte Hain:*
+  • *Short Questions (2–3 Marks):* Definition, key points, ya short difference.
+  • *Long Questions (5–10 Marks):* Complete explanation, classification, process/mechanism, ya examples.
+  • *MCQ & Application Questions:* Concept-based MCQs ya practical/case scenarios.
+
+📌 *Kaun-Kaun Se Questions Ban Chuke Hain (PYQ / Mock):*
+${pyqSectionText}
+${mockSectionText}
+
+✍️ *Answer Kaise Likhna Hai (Writing Structure):*
+  1. *Introduction / Definition:* Pehle 2–3 line mein clear definition likhein.
+  2. *Main Points / Classification:* Headings aur bullet points mein neat points likhein.
+  3. *Examples / Flow Diagram:* Jahan zaroorat ho wahan example ya simple diagram banayein.
+  4. *Conclusion:* Last mein 1–2 line mein short summary likhein.`
+  );
 }
 
 function getMainMenuMarkup(user) {
@@ -299,12 +594,12 @@ function getMainMenuMarkup(user) {
 
 📚 <b>Your Complete Study Assistant</b>
 
-➖ 📖 <b>Syllabus</b>
-➖ ✍️ <b>Hand Written Notes</b>
-➖ 📝 <b>PYQ Question</b>
+➖ 📖 <b>Syllabus</b> (Subject > Units & Topics Text)
+➖ ✍️ <b>Hand Written Notes</b> (Notebook Style Text)
+➖ 📝 <b>PYQ Question</b> (Chapter Wise Past Questions)
 ➖ 🧠 <b>MCQ Question</b>
-➖ 🎯 <b>Mock Test</b>
-➖ 🤖 <b>AI Assistant</b>
+➖ 🎯 <b>Mock Test</b> (Chapter Wise Practice Questions)
+➖ 🤖 <b>AI Assistant</b> (PDF Search + Hinglish/English/Hindi)
 ➖ 🔄 <b>Revision Notes</b>
 ➖ 🪪 <b>Admit Cards Link & 📊 Result Link</b>
 
@@ -332,42 +627,6 @@ function getMainMenuMarkup(user) {
   return { resText: welcomeText, reply_markup: { inline_keyboard } };
 }
 
-function getAiAssistantReply(questionText, user) {
-  const scope = [
-    user.selectedCategory,
-    user.selectedStream,
-    user.selectedYear,
-    user.selectedSemester,
-    user.selectedType
-  ]
-    .filter(Boolean)
-    .join(" > ");
-
-  if (user.selectedType === "Hand Written Notes") {
-    return (
-`✍️ <b>HAND WRITTEN NOTES — QUICK NOTEBOOK SUMMARY</b>
-
-📌 <b>Scope:</b> <code>${scope || "Hand Written Notes"}</code>
-📖 <b>Topic:</b> <b>${questionText}</b>
-
-📝 <b>Key Points (Notebook Style):</b>
-• <b>Concept / Definition:</b> ${questionText} ko short aur exam-ready points mein samjhein.
-• <b>Important Points / Rules:</b> Main headings, steps, formulas, ya examples note karein.
-• <b>Full Handwritten Notes:</b> Complete notes ke liye <b>Hand Written Notes</b> section mein Course &gt; Year/Semester &gt; Unit &gt; Topic open karein.`
-    );
-  }
-
-  return (
-`🤖 <b>STUDY MATERIAL AI ASSISTANT</b>
-
-📌 <b>Scope:</b> <code>${scope || "General Study"}</code>
-❓ <b>Topic / Doubt:</b> ${questionText}
-
-💡 <b>Study Tip:</b> Pehle is topic ka Syllabus aur Revision Notes dekhein, uske baad PYQ aur MCQ practice karein.
-📄 Official PDFs / Notes ke liye <b>Syllabus</b>, <b>Hand Written Notes</b>, <b>PYQ Question</b>, <b>MCQ Question</b>, <b>Mock Test</b>, ya <b>Revision Notes</b> section open karein.`
-  );
-}
-
 app.get('/', (req, res) => {
   res.status(200).send('STUDY MATERIAL BOT server is running.');
 });
@@ -382,22 +641,12 @@ app.post('/webhook', async (req, res) => {
       const text = (update.message.text || "").trim();
       const user = getUser(from.id, from.first_name);
 
-      // Strict PDF upload: Sirf Admin PDF add kar sakta hai
+      // Admin PDF upload -> Extract text into DB for Hand Written Notes & AI Assistant search
       if (update.message.document) {
         if (!isAdmin(from.id)) {
           await axios.post(`${TELEGRAM_API}/sendMessage`, {
             chat_id: chatId,
             text: "🚫 <b>Permission Denied:</b> Sirf Admin hi PDF ya study material add kar sakta hai.",
-            parse_mode: "HTML"
-          });
-          return;
-        }
-
-        const flow = user.adminUploadFlow;
-        if (!flow || flow.step !== "WAITING_PDF") {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, {
-            chat_id: chatId,
-            text: "ℹ️ Pehle <code>/add_pdf</code> command bhejein, phir PDF file upload karein.",
             parse_mode: "HTML"
           });
           return;
@@ -417,21 +666,56 @@ app.post('/webhook', async (req, res) => {
           return;
         }
 
-        const bucket = getUnitBucket(flow.category, flow.course, flow.periodKey, flow.studyType, true);
-        if (!bucket.units[flow.unitName]) {
-          bucket.units[flow.unitName] = { chapters: {} };
-        }
-        if (!bucket.units[flow.unitName].chapters[flow.chapterName]) {
-          bucket.units[flow.unitName].chapters[flow.chapterName] = [];
+        const flow = user.adminUploadFlow || {};
+        let extractedText = "";
+
+        try {
+          const fileInfoRes = await axios.get(`${TELEGRAM_API}/getFile`, {
+            params: { file_id: doc.file_id }
+          });
+          const filePath = fileInfoRes.data && fileInfoRes.data.result && fileInfoRes.data.result.file_path;
+          if (filePath) {
+            const fileUrl = `https://api.telegram.org/file/bot${TOKEN}/${filePath}`;
+            const pdfBufferRes = await axios.get(fileUrl, { responseType: "arraybuffer" });
+            const parsedPdf = await pdfParse(Buffer.from(pdfBufferRes.data));
+            extractedText = (parsedPdf.text || "").trim();
+          }
+        } catch (pdfErr) {
+          console.log("PDF parse error:", pdfErr.message);
         }
 
-        bucket.units[flow.unitName].chapters[flow.chapterName].push({
-          title: flow.title,
+        const pdfRecord = {
+          title: flow.title || doc.file_name || "Uploaded PDF",
+          fileName: doc.file_name || "document.pdf",
           fileId: doc.file_id,
-          fileName: doc.file_name || `${flow.title}.pdf`,
+          category: flow.category || "Pharmacy",
+          course: flow.course || "B.Pharma",
+          periodKey: flow.periodKey || "1st Year > Semester 1",
+          subjectName: flow.subjectName || "",
+          unitName: flow.unitName || "",
+          extractedText,
           addedBy: from.id,
           addedAt: new Date().toISOString()
-        });
+        };
+
+        studyDb.uploadedPdfs.push(pdfRecord);
+
+        if (flow.category && flow.course && flow.periodKey && flow.subjectName && flow.unitName) {
+          const unitRec = ensureUnitRecord(
+            flow.category,
+            flow.course,
+            flow.periodKey,
+            "Hand Written Notes",
+            flow.subjectName,
+            flow.unitName,
+            true
+          );
+          if (extractedText) {
+            unitRec.handwrittenNotes = unitRec.handwrittenNotes
+              ? `${unitRec.handwrittenNotes}\n${extractedText}`
+              : extractedText;
+          }
+        }
 
         user.adminUploadFlow = null;
         saveData();
@@ -439,14 +723,13 @@ app.post('/webhook', async (req, res) => {
         await axios.post(`${TELEGRAM_API}/sendMessage`, {
           chat_id: chatId,
           text:
-`✅ <b>Material / PDF Added!</b>
+`✅ <b>PDF Indexed for Handwritten Notes & AI Assistant!</b>
 
-📚 <b>Module:</b> ${flow.studyType}
-🎓 <b>Category / Course:</b> ${flow.category} > ${flow.course}
-🗓️ <b>Period:</b> ${flow.periodKey}
-📂 <b>Unit:</b> ${flow.unitName}
-📘 <b>Topic / Chapter:</b> ${flow.chapterName}
-📄 <b>Title:</b> <code>${flow.title}</code>`,
+📄 <b>Title:</b> <code>${pdfRecord.title}</code>
+📝 <b>Extracted Text Length:</b> ${extractedText.length} characters
+📚 <b>Total Indexed PDFs:</b> ${studyDb.uploadedPdfs.length}
+
+<i>Ab students ko Syllabus mein PDF nahi balki text milega, aur Hand Written Notes + AI Assistant isi text mein se handwritten style notes & answers denge.</i>`,
           parse_mode: "HTML"
         });
         return;
@@ -479,377 +762,149 @@ app.post('/webhook', async (req, res) => {
           reply_markup: menu.reply_markup
         });
       }
-      // ADMIN ONLY: /add_year Category | Course | YearName
-      else if (text.startsWith('/add_year')) {
-        if (!isAdmin(from.id)) {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, { chat_id: chatId, text: "⛔ Sirf Admin hi year add kar sakta hai." });
-          return;
-        }
-        const parts = text.replace('/add_year', '').trim().split('|').map((s) => s.trim());
-        if (parts.length < 3) {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, {
-            chat_id: chatId,
-            text: "⚠️ Use: <code>/add_year Category | Course | YearName</code>",
-            parse_mode: "HTML"
-          });
-          return;
-        }
-        const [category, course, yearName] = parts;
-        const key = `${category}::${course}`;
-        if (!studyDb.customYears[key]) studyDb.customYears[key] = [];
-        if (!studyDb.customYears[key].includes(yearName)) studyDb.customYears[key].push(yearName);
-        saveData();
-        await axios.post(`${TELEGRAM_API}/sendMessage`, {
-          chat_id: chatId,
-          text: `✅ <b>Year Added!</b>\n${category} > ${course} > <b>${yearName}</b>`,
-          parse_mode: "HTML"
-        });
-      }
-      // ADMIN ONLY: /remove_year Category | Course | YearName
-      else if (text.startsWith('/remove_year')) {
-        if (!isAdmin(from.id)) {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, { chat_id: chatId, text: "⛔ Sirf Admin hi year remove kar sakta hai." });
-          return;
-        }
-        const parts = text.replace('/remove_year', '').trim().split('|').map((s) => s.trim());
-        if (parts.length < 3) {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, {
-            chat_id: chatId,
-            text: "⚠️ Use: <code>/remove_year Category | Course | YearName</code>",
-            parse_mode: "HTML"
-          });
-          return;
-        }
-        const [category, course, yearName] = parts;
-        const key = `${category}::${course}`;
-        if (studyDb.customYears[key]) {
-          studyDb.customYears[key] = studyDb.customYears[key].filter((y) => y !== yearName);
-        }
-        if (studyDb.materials[category] && studyDb.materials[category][course]) {
-          for (const pKey of Object.keys(studyDb.materials[category][course])) {
-            if (pKey === yearName || pKey.startsWith(`${yearName} > `)) {
-              delete studyDb.materials[category][course][pKey];
-            }
-          }
-        }
-        saveData();
-        await axios.post(`${TELEGRAM_API}/sendMessage`, {
-          chat_id: chatId,
-          text: `🗑️ Year <b>${yearName}</b> removed for ${category} > ${course}.`,
-          parse_mode: "HTML"
-        });
-      }
-      // ADMIN ONLY: /add_semester Category | Course | YearOrNone | SemesterName
-      else if (text.startsWith('/add_semester')) {
-        if (!isAdmin(from.id)) {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, { chat_id: chatId, text: "⛔ Sirf Admin hi semester add kar sakta hai." });
-          return;
-        }
-        const parts = text.replace('/add_semester', '').trim().split('|').map((s) => s.trim());
-        if (parts.length < 4) {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, {
-            chat_id: chatId,
-            text: "⚠️ Use: <code>/add_semester Category | Course | YearName (or -) | SemesterName</code>\nExample: <code>/add_semester Pharmacy | B.Pharma | 1st Year | Semester 1</code>",
-            parse_mode: "HTML"
-          });
-          return;
-        }
-        const [category, course, yearRaw, semesterName] = parts;
-        const yearName = (!yearRaw || yearRaw === "-" || yearRaw.toLowerCase() === "none") ? null : yearRaw;
-        const semKey = yearName ? `${category}::${course}::${yearName}` : `${category}::${course}`;
-        if (!studyDb.customSemesters[semKey]) studyDb.customSemesters[semKey] = [];
-        if (!studyDb.customSemesters[semKey].includes(semesterName)) {
-          studyDb.customSemesters[semKey].push(semesterName);
-        }
-        const periodKey = buildPeriodStorageKey(yearName, semesterName);
-        ensurePeriod(category, course, periodKey, true);
-        saveData();
-
-        await axios.post(`${TELEGRAM_API}/sendMessage`, {
-          chat_id: chatId,
-          text: `✅ <b>Semester Added!</b>\n${category} > ${course} > <b>${periodKey}</b>`,
-          parse_mode: "HTML"
-        });
-      }
-      // ADMIN ONLY: /remove_semester Category | Course | YearOrNone | SemesterName
-      else if (text.startsWith('/remove_semester')) {
-        if (!isAdmin(from.id)) {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, { chat_id: chatId, text: "⛔ Sirf Admin hi semester remove kar sakta hai." });
-          return;
-        }
-        const parts = text.replace('/remove_semester', '').trim().split('|').map((s) => s.trim());
-        if (parts.length < 4) {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, {
-            chat_id: chatId,
-            text: "⚠️ Use: <code>/remove_semester Category | Course | YearName (or -) | SemesterName</code>",
-            parse_mode: "HTML"
-          });
-          return;
-        }
-        const [category, course, yearRaw, semesterName] = parts;
-        const yearName = (!yearRaw || yearRaw === "-" || yearRaw.toLowerCase() === "none") ? null : yearRaw;
-        const semKey = yearName ? `${category}::${course}::${yearName}` : `${category}::${course}`;
-        if (studyDb.customSemesters[semKey]) {
-          studyDb.customSemesters[semKey] = studyDb.customSemesters[semKey].filter((s) => s !== semesterName);
-        }
-        const periodKey = buildPeriodStorageKey(yearName, semesterName);
-        if (studyDb.materials[category] && studyDb.materials[category][course]) {
-          delete studyDb.materials[category][course][periodKey];
-        }
-        saveData();
-
-        await axios.post(`${TELEGRAM_API}/sendMessage`, {
-          chat_id: chatId,
-          text: `🗑️ Semester <b>${periodKey}</b> removed.`,
-          parse_mode: "HTML"
-        });
-      }
-      // ADMIN ONLY: /add_unit Category | Course | YearOrNone | Semester | StudyType | UnitName
-      else if (text.startsWith('/add_unit')) {
-        if (!isAdmin(from.id)) {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, { chat_id: chatId, text: "⛔ Sirf Admin hi unit add kar sakta hai." });
-          return;
-        }
-        const parts = text.replace('/add_unit', '').trim().split('|').map((s) => s.trim());
-        if (parts.length < 6) {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, {
-            chat_id: chatId,
-            text: "⚠️ Use: <code>/add_unit Category | Course | YearName (or -) | Semester | StudyType | UnitName</code>",
-            parse_mode: "HTML"
-          });
-          return;
-        }
-        const [category, course, yearRaw, semester, studyType, unitName] = parts;
-        const yearName = (!yearRaw || yearRaw === "-" || yearRaw.toLowerCase() === "none") ? null : yearRaw;
-        const periodKey = buildPeriodStorageKey(yearName, semester);
-
-        const bucket = getUnitBucket(category, course, periodKey, studyType, true);
-        if (!bucket.units[unitName]) {
-          bucket.units[unitName] = { chapters: {} };
-        }
-        saveData();
-        await axios.post(`${TELEGRAM_API}/sendMessage`, {
-          chat_id: chatId,
-          text: `✅ <b>Unit Added!</b>\n${category} > ${course} > ${periodKey} > ${studyType}\nUnit: <b>${unitName}</b>`,
-          parse_mode: "HTML"
-        });
-      }
-      // ADMIN ONLY: /remove_unit Category | Course | YearOrNone | Semester | StudyType | UnitName
-      else if (text.startsWith('/remove_unit')) {
-        if (!isAdmin(from.id)) {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, { chat_id: chatId, text: "⛔ Sirf Admin hi unit remove kar sakta hai." });
-          return;
-        }
-        const parts = text.replace('/remove_unit', '').trim().split('|').map((s) => s.trim());
-        if (parts.length < 6) {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, {
-            chat_id: chatId,
-            text: "⚠️ Use: <code>/remove_unit Category | Course | YearName (or -) | Semester | StudyType | UnitName</code>",
-            parse_mode: "HTML"
-          });
-          return;
-        }
-        const [category, course, yearRaw, semester, studyType, unitName] = parts;
-        const yearName = (!yearRaw || yearRaw === "-" || yearRaw.toLowerCase() === "none") ? null : yearRaw;
-        const periodKey = buildPeriodStorageKey(yearName, semester);
-
-        const bucket = getUnitBucket(category, course, periodKey, studyType, false);
-        const existed = !!(bucket && bucket.units && bucket.units[unitName]);
-        if (existed) {
-          delete bucket.units[unitName];
-          saveData();
-        }
-        await axios.post(`${TELEGRAM_API}/sendMessage`, {
-          chat_id: chatId,
-          text: existed
-            ? `🗑️ Unit <b>${unitName}</b> removed!`
-            : `⚠️ Unit <b>${unitName}</b> nahi mili.`,
-          parse_mode: "HTML"
-        });
-      }
-      // ADMIN ONLY: /add_chapter Category | Course | YearOrNone | Semester | StudyType | UnitName | ChapterName
-      else if (text.startsWith('/add_chapter')) {
-        if (!isAdmin(from.id)) {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, { chat_id: chatId, text: "⛔ Sirf Admin hi chapter/material add kar sakta hai." });
-          return;
-        }
-        const parts = text.replace('/add_chapter', '').trim().split('|').map((s) => s.trim());
+      // ADMIN: /add_topic Category | Course | YearOrNone | Semester | Subject | Unit | Topic1, Topic2, ...
+      else if (text.startsWith('/add_topic')) {
+        if (!isAdmin(from.id)) return;
+        const parts = text.replace('/add_topic', '').trim().split('|').map((s) => s.trim());
         if (parts.length < 7) {
           await axios.post(`${TELEGRAM_API}/sendMessage`, {
             chat_id: chatId,
-            text: "⚠️ Use: <code>/add_chapter Category | Course | YearName (or -) | Semester | StudyType | UnitName | ChapterName</code>",
+            text: "⚠️ Use: <code>/add_topic Category | Course | Year (or -) | Semester | Subject | Unit | Topic1, Topic2</code>",
             parse_mode: "HTML"
           });
           return;
         }
-        const [category, course, yearRaw, semester, studyType, unitName, chapterName] = parts;
+        const [category, course, yearRaw, semester, subjectName, unitName, topicsRaw] = parts;
         const yearName = (!yearRaw || yearRaw === "-" || yearRaw.toLowerCase() === "none") ? null : yearRaw;
         const periodKey = buildPeriodStorageKey(yearName, semester);
 
-        const bucket = getUnitBucket(category, course, periodKey, studyType, true);
-        if (!bucket.units[unitName]) {
-          bucket.units[unitName] = { chapters: {} };
-        }
-        if (!bucket.units[unitName].chapters[chapterName]) {
-          bucket.units[unitName].chapters[chapterName] = [];
+        const unitRec = ensureUnitRecord(category, course, periodKey, "Syllabus", subjectName, unitName, true);
+        const newTopics = topicsRaw.split(',').map((t) => t.trim()).filter(Boolean);
+        for (const tp of newTopics) {
+          if (!unitRec.topics.includes(tp)) unitRec.topics.push(tp);
         }
         saveData();
+
         await axios.post(`${TELEGRAM_API}/sendMessage`, {
           chat_id: chatId,
-          text: `✅ <b>Chapter / Syllabus Section Added!</b>\n${category} > ${course} > ${periodKey} > ${studyType}\nUnit: <b>${unitName}</b>\nTopic: <b>${chapterName}</b>`,
+          text: `✅ <b>Syllabus Topics Added!</b>\n${course} > ${periodKey} > <b>${subjectName}</b>\nUnit: <b>${unitName}</b>\nTopics: ${unitRec.topics.join(", ")}`,
           parse_mode: "HTML"
         });
       }
-      // ADMIN ONLY: /remove_chapter Category | Course | YearOrNone | Semester | StudyType | UnitName | ChapterName
-      else if (text.startsWith('/remove_chapter')) {
-        if (!isAdmin(from.id)) {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, { chat_id: chatId, text: "⛔ Sirf Admin hi chapter/material remove kar sakta hai." });
-          return;
-        }
-        const parts = text.replace('/remove_chapter', '').trim().split('|').map((s) => s.trim());
+      // ADMIN: /set_notes Category | Course | YearOrNone | Semester | Subject | Unit | Notes Text
+      else if (text.startsWith('/set_notes')) {
+        if (!isAdmin(from.id)) return;
+        const parts = text.replace('/set_notes', '').trim().split('|').map((s) => s.trim());
         if (parts.length < 7) {
           await axios.post(`${TELEGRAM_API}/sendMessage`, {
             chat_id: chatId,
-            text: "⚠️ Use: <code>/remove_chapter Category | Course | YearName (or -) | Semester | StudyType | UnitName | ChapterName</code>",
+            text: "⚠️ Use: <code>/set_notes Category | Course | Year (or -) | Semester | Subject | Unit | Notes Text</code>",
             parse_mode: "HTML"
           });
           return;
         }
-        const [category, course, yearRaw, semester, studyType, unitName, chapterName] = parts;
+        const [category, course, yearRaw, semester, subjectName, unitName, ...notesParts] = parts;
         const yearName = (!yearRaw || yearRaw === "-" || yearRaw.toLowerCase() === "none") ? null : yearRaw;
         const periodKey = buildPeriodStorageKey(yearName, semester);
+        const notesText = notesParts.join(" | ");
 
-        const bucket = getUnitBucket(category, course, periodKey, studyType, false);
-        const existed = !!(
-          bucket &&
-          bucket.units &&
-          bucket.units[unitName] &&
-          bucket.units[unitName].chapters &&
-          bucket.units[unitName].chapters[chapterName]
-        );
-        if (existed) {
-          delete bucket.units[unitName].chapters[chapterName];
-          saveData();
-        }
+        const unitRec = ensureUnitRecord(category, course, periodKey, "Hand Written Notes", subjectName, unitName, true);
+        unitRec.handwrittenNotes = notesText;
+        saveData();
+
         await axios.post(`${TELEGRAM_API}/sendMessage`, {
           chat_id: chatId,
-          text: existed
-            ? `🗑️ Chapter / Syllabus Section <b>${chapterName}</b> removed!`
-            : `⚠️ Chapter / Syllabus Section <b>${chapterName}</b> nahi mila.`,
+          text: `✅ <b>Hand Written Notes Saved!</b>\n${course} > ${periodKey} > <b>${subjectName}</b> > <b>${unitName}</b>`,
           parse_mode: "HTML"
         });
       }
-      // ADMIN ONLY: /add_pdf Category | Course | YearOrNone | Semester | StudyType | UnitName | ChapterName | PDF Title
+      // ADMIN: /add_pyq Category | Course | YearOrNone | Semester | Subject | Unit | Question1; Question2
+      else if (text.startsWith('/add_pyq')) {
+        if (!isAdmin(from.id)) return;
+        const parts = text.replace('/add_pyq', '').trim().split('|').map((s) => s.trim());
+        if (parts.length < 7) {
+          await axios.post(`${TELEGRAM_API}/sendMessage`, {
+            chat_id: chatId,
+            text: "⚠️ Use: <code>/add_pyq Category | Course | Year (or -) | Semester | Subject | Unit | Q1; Q2</code>",
+            parse_mode: "HTML"
+          });
+          return;
+        }
+        const [category, course, yearRaw, semester, subjectName, unitName, ...qParts] = parts;
+        const yearName = (!yearRaw || yearRaw === "-" || yearRaw.toLowerCase() === "none") ? null : yearRaw;
+        const periodKey = buildPeriodStorageKey(yearName, semester);
+        const qList = qParts.join(" | ").split(';').map((q) => q.trim()).filter(Boolean);
+
+        const unitRec = ensureUnitRecord(category, course, periodKey, "PYQ Question", subjectName, unitName, true);
+        unitRec.pyqQuestions.push(...qList);
+        saveData();
+
+        await axios.post(`${TELEGRAM_API}/sendMessage`, {
+          chat_id: chatId,
+          text: `✅ <b>${qList.length} PYQ Question(s) Added!</b>\n${course} > ${periodKey} > <b>${subjectName}</b> > <b>${unitName}</b>`,
+          parse_mode: "HTML"
+        });
+      }
+      // ADMIN: /add_mock Category | Course | YearOrNone | Semester | Subject | Unit | Q1; Q2
+      else if (text.startsWith('/add_mock')) {
+        if (!isAdmin(from.id)) return;
+        const parts = text.replace('/add_mock', '').trim().split('|').map((s) => s.trim());
+        if (parts.length < 7) {
+          await axios.post(`${TELEGRAM_API}/sendMessage`, {
+            chat_id: chatId,
+            text: "⚠️ Use: <code>/add_mock Category | Course | Year (or -) | Semester | Subject | Unit | Q1; Q2</code>",
+            parse_mode: "HTML"
+          });
+          return;
+        }
+        const [category, course, yearRaw, semester, subjectName, unitName, ...qParts] = parts;
+        const yearName = (!yearRaw || yearRaw === "-" || yearRaw.toLowerCase() === "none") ? null : yearRaw;
+        const periodKey = buildPeriodStorageKey(yearName, semester);
+        const qList = qParts.join(" | ").split(';').map((q) => q.trim()).filter(Boolean);
+
+        const unitRec = ensureUnitRecord(category, course, periodKey, "Mock Test", subjectName, unitName, true);
+        unitRec.mockQuestions.push(...qList);
+        saveData();
+
+        await axios.post(`${TELEGRAM_API}/sendMessage`, {
+          chat_id: chatId,
+          text: `✅ <b>${qList.length} Mock Question(s) Added!</b>\n${course} > ${periodKey} > <b>${subjectName}</b> > <b>${unitName}</b>`,
+          parse_mode: "HTML"
+        });
+      }
+      // ADMIN: /add_pdf Category | Course | YearOrNone | Semester | Subject | Unit | PDF Title
       else if (text.startsWith('/add_pdf')) {
-        if (!isAdmin(from.id)) {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, { chat_id: chatId, text: "⛔ Sirf Admin hi PDF add kar sakta hai." });
-          return;
-        }
+        if (!isAdmin(from.id)) return;
         const parts = text.replace('/add_pdf', '').trim().split('|').map((s) => s.trim());
-        if (parts.length < 8) {
+        if (parts.length < 7) {
           await axios.post(`${TELEGRAM_API}/sendMessage`, {
             chat_id: chatId,
-            text: "⚠️ Use: <code>/add_pdf Category | Course | YearName (or -) | Semester | StudyType | UnitName | ChapterName | PDF Title</code>",
+            text: "⚠️ Use: <code>/add_pdf Category | Course | Year (or -) | Semester | Subject | Unit | PDF Title</code>",
             parse_mode: "HTML"
           });
           return;
         }
-        const [category, course, yearRaw, semester, studyType, unitName, chapterName, title] = parts;
+        const [category, course, yearRaw, semester, subjectName, unitName, ...titleParts] = parts;
         const yearName = (!yearRaw || yearRaw === "-" || yearRaw.toLowerCase() === "none") ? null : yearRaw;
         const periodKey = buildPeriodStorageKey(yearName, semester);
+        const title = titleParts.join(" | ");
 
         user.adminUploadFlow = {
           step: "WAITING_PDF",
           category,
           course,
           periodKey,
-          studyType,
+          subjectName,
           unitName,
-          chapterName,
           title
         };
         saveData();
-        await axios.post(`${TELEGRAM_API}/sendMessage`, {
-          chat_id: chatId,
-          text: `📎 Ab <b>${title}</b> ke liye PDF bhejein.\nTarget: ${category} > ${course} > ${periodKey} > ${studyType} > ${unitName} > ${chapterName}`,
-          parse_mode: "HTML"
-        });
-      }
-      // ADMIN ONLY: /remove_pdf Category | Course | YearOrNone | Semester | StudyType | UnitName | ChapterName | PDF Title
-      else if (text.startsWith('/remove_pdf')) {
-        if (!isAdmin(from.id)) {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, { chat_id: chatId, text: "⛔ Sirf Admin hi PDF remove kar sakta hai." });
-          return;
-        }
-        const parts = text.replace('/remove_pdf', '').trim().split('|').map((s) => s.trim());
-        if (parts.length < 8) {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, {
-            chat_id: chatId,
-            text: "⚠️ Use: <code>/remove_pdf Category | Course | YearName (or -) | Semester | StudyType | UnitName | ChapterName | PDF Title</code>",
-            parse_mode: "HTML"
-          });
-          return;
-        }
-        const [category, course, yearRaw, semester, studyType, unitName, chapterName, title] = parts;
-        const yearName = (!yearRaw || yearRaw === "-" || yearRaw.toLowerCase() === "none") ? null : yearRaw;
-        const periodKey = buildPeriodStorageKey(yearName, semester);
 
-        const bucket = getUnitBucket(category, course, periodKey, studyType, false);
-        const list = bucket && bucket.units[unitName] && bucket.units[unitName].chapters[chapterName];
-        let removedCount = 0;
-        if (Array.isArray(list)) {
-          const beforeLen = list.length;
-          bucket.units[unitName].chapters[chapterName] = list.filter((p) => p.title !== title);
-          removedCount = beforeLen - bucket.units[unitName].chapters[chapterName].length;
-          if (removedCount > 0) saveData();
-        }
         await axios.post(`${TELEGRAM_API}/sendMessage`, {
           chat_id: chatId,
-          text: removedCount > 0
-            ? `🗑️ Removed <b>${removedCount}</b> PDF titled <code>${title}</code>.`
-            : `⚠️ PDF <code>${title}</code> nahi mili.`,
+          text: `📎 Ab <b>${title}</b> ke liye PDF bhejein. Bot uska text extract karke Handwritten Notes aur AI Assistant search mein jodega.`,
           parse_mode: "HTML"
         });
-      }
-      else if (text.startsWith('/set_admit_link')) {
-        if (!isAdmin(from.id)) return;
-        const [category, course, label, url] = text.replace('/set_admit_link', '').trim().split('|').map((s) => s.trim());
-        if (!category || !course || !label || !url) return;
-        const key = `${category}::${course}`;
-        if (!studyDb.links.admitCards[key]) studyDb.links.admitCards[key] = [];
-        studyDb.links.admitCards[key].push({ label, url });
-        saveData();
-        await axios.post(`${TELEGRAM_API}/sendMessage`, { chat_id: chatId, text: "✅ Admit Card link added!" });
-      }
-      else if (text.startsWith('/remove_admit_link')) {
-        if (!isAdmin(from.id)) return;
-        const [category, course, label] = text.replace('/remove_admit_link', '').trim().split('|').map((s) => s.trim());
-        const key = `${category}::${course}`;
-        if (studyDb.links.admitCards[key]) {
-          studyDb.links.admitCards[key] = studyDb.links.admitCards[key].filter((item) => item.label !== label);
-          saveData();
-        }
-        await axios.post(`${TELEGRAM_API}/sendMessage`, { chat_id: chatId, text: "🗑️ Admit Card link removed!" });
-      }
-      else if (text.startsWith('/set_result_link')) {
-        if (!isAdmin(from.id)) return;
-        const [category, course, label, url] = text.replace('/set_result_link', '').trim().split('|').map((s) => s.trim());
-        if (!category || !course || !label || !url) return;
-        const key = `${category}::${course}`;
-        if (!studyDb.links.results[key]) studyDb.links.results[key] = [];
-        studyDb.links.results[key].push({ label, url });
-        saveData();
-        await axios.post(`${TELEGRAM_API}/sendMessage`, { chat_id: chatId, text: "✅ Result link added!" });
-      }
-      else if (text.startsWith('/remove_result_link')) {
-        if (!isAdmin(from.id)) return;
-        const [category, course, label] = text.replace('/remove_result_link', '').trim().split('|').map((s) => s.trim());
-        const key = `${category}::${course}`;
-        if (studyDb.links.results[key]) {
-          studyDb.links.results[key] = studyDb.links.results[key].filter((item) => item.label !== label);
-          saveData();
-        }
-        await axios.post(`${TELEGRAM_API}/sendMessage`, { chat_id: chatId, text: "🗑️ Result link removed!" });
       }
       else if (text.startsWith('/addupdate')) {
         if (!isAdmin(from.id)) return;
@@ -865,11 +920,13 @@ app.post('/webhook', async (req, res) => {
         }
         await axios.post(`${TELEGRAM_API}/sendMessage`, { chat_id: chatId, text: "✅ Broadcast sent!" });
       }
+      // AI Assistant message handler
       else if (user.selectedType === "AI Assistant" && text.length > 0) {
+        const reply = buildSmartAiAssistantResponse(text, user);
         await axios.post(`${TELEGRAM_API}/sendMessage`, {
           chat_id: chatId,
-          text: getAiAssistantReply(text, user),
-          parse_mode: "HTML"
+          text: reply,
+          parse_mode: "Markdown"
         });
       }
     }
@@ -897,7 +954,7 @@ app.post('/webhook', async (req, res) => {
           reply_markup: menu.reply_markup
         });
       }
-      // Step 1: Study Type (e.g., Syllabus) -> Show Categories
+      // Step 1: Study Type -> Show Categories
       else if (data.startsWith("type_")) {
         const idx = parseInt(data.replace("type_", ""), 10);
         const typeName =
@@ -916,6 +973,27 @@ app.post('/webhook', async (req, res) => {
         saveData();
 
         await deletePrevMessage();
+
+        if (typeName === "AI Assistant") {
+          await axios.post(`${TELEGRAM_API}/sendMessage`, {
+            chat_id: chatId,
+            text:
+`🤖 <b>AI ASSISTANT READY</b>
+
+Kisi bhi topic ya question ke baare mein poochhein (Hinglish, English, ya Hindi mein).
+Bot admin ki uploaded PDFs mein se topic dhoondh kar:
+• Handwritten style notes dega
+• Batayega kis-kis type ke questions ban sakte hain
+• Kaun-kaun se questions ban chuke hain
+• Aur answer kaise likhna hai, sab samjhayega!`,
+            parse_mode: "HTML",
+            reply_markup: {
+              inline_keyboard: [[{ text: "🔙 Main Menu", callback_data: "main_menu" }]]
+            }
+          });
+          return;
+        }
+
         const catButtons = CATEGORY_LIST.map((catName, cIdx) => [
           { text: `🎓 ${catName}`, callback_data: `cat_${cIdx}` }
         ]);
@@ -952,7 +1030,7 @@ app.post('/webhook', async (req, res) => {
           reply_markup: { inline_keyboard: courseButtons }
         });
       }
-      // Step 3: Course selected -> If Years exist, show Years; otherwise show Semesters directly
+      // Step 3: Course -> If Years exist, show Years; else show Semesters
       else if (data.startsWith("str_")) {
         const [, cIdxStr, sIdxStr] = data.split("_");
         const cIdx = parseInt(cIdxStr, 10);
@@ -996,8 +1074,6 @@ app.post('/webhook', async (req, res) => {
         }
 
         const years = getYearsForCourse(catName, courseName);
-
-        // Agar Years available hain (jaise B.Pharma / D.Pharma): pehle Years dikhayein
         if (years.length > 0) {
           const yearButtons = years.map((yrName, yIdx) => [
             { text: `📅 ${yrName}`, callback_data: `yr_${cIdx}_${sIdx}_${yIdx}` }
@@ -1013,7 +1089,6 @@ app.post('/webhook', async (req, res) => {
           return;
         }
 
-        // Agar Years nahi hain: seedha Semesters dikhayein
         const sems = getSemestersForCourse(catName, courseName, null);
         const semButtons = sems.map((semName, semIdx) => [
           { text: `🗓️ ${semName}`, callback_data: `sem_${cIdx}_${sIdx}_n_${semIdx}` }
@@ -1027,7 +1102,7 @@ app.post('/webhook', async (req, res) => {
           reply_markup: { inline_keyboard: semButtons }
         });
       }
-      // Step 3B: Year selected -> Show Semesters inside that Year
+      // Step 3B: Year -> Show Semesters
       else if (data.startsWith("yr_")) {
         const [, cIdxStr, sIdxStr, yIdxStr] = data.split("_");
         const cIdx = parseInt(cIdxStr, 10);
@@ -1036,8 +1111,7 @@ app.post('/webhook', async (req, res) => {
 
         const catName = CATEGORY_LIST[cIdx];
         const courseName = CATEGORIES[catName][sIdx];
-        const years = getYearsForCourse(catName, courseName);
-        const yearName = years[yIdx];
+        const yearName = getYearsForCourse(catName, courseName)[yIdx];
         const studyType = user.selectedType || "Syllabus";
 
         user.selectedCategory = catName;
@@ -1061,7 +1135,7 @@ app.post('/webhook', async (req, res) => {
           reply_markup: { inline_keyboard: semButtons }
         });
       }
-      // Step 4: Semester selected -> Show Syllabus / Units inside that Semester
+      // Step 4: Semester -> Show Subjects
       else if (data.startsWith("sem_")) {
         const [, cIdxStr, sIdxStr, yPart, semIdxStr] = data.split("_");
         const cIdx = parseInt(cIdxStr, 10);
@@ -1071,8 +1145,7 @@ app.post('/webhook', async (req, res) => {
         const catName = CATEGORY_LIST[cIdx];
         const courseName = CATEGORIES[catName][sIdx];
         const yearName = yPart === "n" ? null : getYearsForCourse(catName, courseName)[parseInt(yPart, 10)];
-        const sems = getSemestersForCourse(catName, courseName, yearName);
-        const semName = sems[semIdx];
+        const semName = getSemestersForCourse(catName, courseName, yearName)[semIdx];
         const studyType = user.selectedType || "Syllabus";
         const periodKey = buildPeriodStorageKey(yearName, semName);
 
@@ -1084,26 +1157,14 @@ app.post('/webhook', async (req, res) => {
 
         await deletePrevMessage();
 
-        if (studyType === "AI Assistant") {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, {
-            chat_id: chatId,
-            text: `🤖 <b>AI Assistant Ready</b>\n\nScope: <b>${courseName} > ${periodKey}</b>\nApna topic ya question abhi type karke bhejein!`,
-            parse_mode: "HTML",
-            reply_markup: {
-              inline_keyboard: [[{ text: "🔙 Main Menu", callback_data: "main_menu" }]]
-            }
-          });
-          return;
-        }
-
         const tIdx = ALLOWED_STUDY_TYPES.indexOf(studyType);
-        const bucket = getUnitBucket(catName, courseName, periodKey, studyType, false);
-        const units = bucket ? Object.keys(bucket.units) : [];
+        const bucket = getSubjectBucket(catName, courseName, periodKey, studyType, false);
+        const subjects = bucket ? Object.keys(bucket.subjects) : [];
 
-        if (units.length === 0) {
+        if (subjects.length === 0) {
           await axios.post(`${TELEGRAM_API}/sendMessage`, {
             chat_id: chatId,
-            text: `📖 <b>${courseName} > ${periodKey} — ${studyType}</b>\n\nIs semester mein abhi koi ${studyType} unit add nahi hui hai.`,
+            text: `📘 <b>${courseName} > ${periodKey} — ${studyType}</b>\n\nIs semester mein abhi koi subject add nahi hua hai.`,
             parse_mode: "HTML",
             reply_markup: {
               inline_keyboard: [[{ text: "🔙 Main Menu", callback_data: "main_menu" }]]
@@ -1112,25 +1173,108 @@ app.post('/webhook', async (req, res) => {
           return;
         }
 
-        const unitButtons = units.map((unitName, uIdx) => [
-          { text: `📂 ${unitName}`, callback_data: `unit_${cIdx}_${sIdx}_${yPart}_${semIdx}_${tIdx}_${uIdx}` }
+        const subjButtons = subjects.map((subjName, sbIdx) => [
+          { text: `📘 ${subjName}`, callback_data: `subj_${cIdx}_${sIdx}_${yPart}_${semIdx}_${tIdx}_${sbIdx}` }
+        ]);
+        subjButtons.push([{ text: "🔙 Main Menu", callback_data: "main_menu" }]);
+
+        await axios.post(`${TELEGRAM_API}/sendMessage`, {
+          chat_id: chatId,
+          text: `🗓️ <b>${courseName} — ${periodKey} (${studyType})</b>\n\nApna <b>Subject</b> chunein:`,
+          parse_mode: "HTML",
+          reply_markup: { inline_keyboard: subjButtons }
+        });
+      }
+      // Step 5: Subject selected
+      // - If Syllabus: Immediately show ONLY text message with Unit/Chapter count & Topics inside each Unit/Chapter (NO PDF!)
+      // - If Hand Written Notes / PYQ Question / Mock Test: Show Units/Chapters buttons
+      else if (data.startsWith("subj_")) {
+        const [, cIdxStr, sIdxStr, yPart, semIdxStr, tIdxStr, sbIdxStr] = data.split("_");
+        const cIdx = parseInt(cIdxStr, 10);
+        const sIdx = parseInt(sIdxStr, 10);
+        const semIdx = parseInt(semIdxStr, 10);
+        const tIdx = parseInt(tIdxStr, 10);
+        const sbIdx = parseInt(sbIdxStr, 10);
+
+        const catName = CATEGORY_LIST[cIdx];
+        const courseName = CATEGORIES[catName][sIdx];
+        const yearName = yPart === "n" ? null : getYearsForCourse(catName, courseName)[parseInt(yPart, 10)];
+        const semName = getSemestersForCourse(catName, courseName, yearName)[semIdx];
+        const studyType = ALLOWED_STUDY_TYPES[tIdx];
+        const periodKey = buildPeriodStorageKey(yearName, semName);
+
+        const bucket = getSubjectBucket(catName, courseName, periodKey, studyType, false);
+        const subjectName = bucket ? Object.keys(bucket.subjects)[sbIdx] : null;
+        const unitsObj = subjectName ? (bucket.subjects[subjectName].units || {}) : {};
+        const unitNames = Object.keys(unitsObj);
+
+        await deletePrevMessage();
+
+        // SYLLABUS = ONLY TEXT MESSAGE (Units/Chapters count + Topics inside each)
+        if (studyType === "Syllabus") {
+          let syllabusBody = "";
+          if (unitNames.length === 0) {
+            syllabusBody = "Is subject mein abhi koi unit / chapter add nahi hua hai.";
+          } else {
+            syllabusBody = unitNames
+              .map((uName, idx) => {
+                const tList = unitsObj[uName].topics || [];
+                const topicLines = tList.length > 0
+                  ? tList.map((tp) => `   • ${tp}`).join("\n")
+                  : "   • (Topics add karna baaki hai)";
+                return `<b>${idx + 1}. ${uName}</b>\n${topicLines}`;
+              })
+              .join("\n\n");
+          }
+
+          await axios.post(`${TELEGRAM_API}/sendMessage`, {
+            chat_id: chatId,
+            text:
+`📖 <b>SYLLABUS — ${subjectName}</b>
+🎓 ${courseName} > ${periodKey}
+📊 <b>Total Units / Chapters:</b> ${unitNames.length}
+
+${syllabusBody}`,
+            parse_mode: "HTML",
+            reply_markup: {
+              inline_keyboard: [[{ text: "🔙 Main Menu", callback_data: "main_menu" }]]
+            }
+          });
+          return;
+        }
+
+        if (unitNames.length === 0) {
+          await axios.post(`${TELEGRAM_API}/sendMessage`, {
+            chat_id: chatId,
+            text: `📂 <b>${subjectName} — ${studyType}</b>\n\nIs subject mein abhi koi unit / chapter available nahi hai.`,
+            parse_mode: "HTML",
+            reply_markup: {
+              inline_keyboard: [[{ text: "🔙 Main Menu", callback_data: "main_menu" }]]
+            }
+          });
+          return;
+        }
+
+        const unitButtons = unitNames.map((uName, uIdx) => [
+          { text: `📂 ${uName}`, callback_data: `sunit_${cIdx}_${sIdx}_${yPart}_${semIdx}_${tIdx}_${sbIdx}_${uIdx}` }
         ]);
         unitButtons.push([{ text: "🔙 Main Menu", callback_data: "main_menu" }]);
 
         await axios.post(`${TELEGRAM_API}/sendMessage`, {
           chat_id: chatId,
-          text: `📖 <b>${courseName} — ${periodKey} (${studyType})</b>\n\nSyllabus Unit chunein:`,
+          text: `📘 <b>${subjectName} — ${studyType}</b>\n\nUnit / Chapter chunein:`,
           parse_mode: "HTML",
           reply_markup: { inline_keyboard: unitButtons }
         });
       }
-      // Step 5: Unit selected -> Show Chapters / Syllabus Topics
-      else if (data.startsWith("unit_")) {
-        const [, cIdxStr, sIdxStr, yPart, semIdxStr, tIdxStr, uIdxStr] = data.split("_");
+      // Step 6: Unit/Chapter selected for Hand Written Notes / PYQ Question / Mock Test
+      else if (data.startsWith("sunit_")) {
+        const [, cIdxStr, sIdxStr, yPart, semIdxStr, tIdxStr, sbIdxStr, uIdxStr] = data.split("_");
         const cIdx = parseInt(cIdxStr, 10);
         const sIdx = parseInt(sIdxStr, 10);
         const semIdx = parseInt(semIdxStr, 10);
         const tIdx = parseInt(tIdxStr, 10);
+        const sbIdx = parseInt(sbIdxStr, 10);
         const uIdx = parseInt(uIdxStr, 10);
 
         const catName = CATEGORY_LIST[cIdx];
@@ -1140,16 +1284,46 @@ app.post('/webhook', async (req, res) => {
         const studyType = ALLOWED_STUDY_TYPES[tIdx];
         const periodKey = buildPeriodStorageKey(yearName, semName);
 
-        const bucket = getUnitBucket(catName, courseName, periodKey, studyType, false);
-        const unitName = bucket ? Object.keys(bucket.units)[uIdx] : null;
-        const chapters = unitName ? Object.keys(bucket.units[unitName].chapters || {}) : [];
+        const bucket = getSubjectBucket(catName, courseName, periodKey, studyType, false);
+        const subjectName = bucket ? Object.keys(bucket.subjects)[sbIdx] : null;
+        const unitName = subjectName ? Object.keys(bucket.subjects[subjectName].units || {})[uIdx] : null;
+        const unitRec = unitName ? bucket.subjects[subjectName].units[unitName] : null;
 
         await deletePrevMessage();
 
-        if (chapters.length === 0) {
+        if (studyType === "Hand Written Notes") {
+          const lang = detectLanguage(unitName || "");
+          const combinedPdfText = (studyDb.uploadedPdfs || [])
+            .filter((p) =>
+              (!p.subjectName || p.subjectName.toLowerCase().includes((subjectName || "").toLowerCase())) &&
+              p.extractedText
+            )
+            .map((p) => p.extractedText)
+            .join("\n");
+
+          const sourceText = (unitRec && unitRec.handwrittenNotes) || combinedPdfText || (unitRec && (unitRec.topics || []).join("\n")) || "";
+          const formattedNotes = buildHandwrittenText(sourceText, `${subjectName} — ${unitName}`, lang);
+
           await axios.post(`${TELEGRAM_API}/sendMessage`, {
             chat_id: chatId,
-            text: `📂 <b>${unitName || "Unit"}</b> (${periodKey})\n\nIs unit mein abhi koi syllabus topic / chapter add nahi hua hai.`,
+            text: formattedNotes,
+            parse_mode: "Markdown",
+            reply_markup: {
+              inline_keyboard: [[{ text: "🔙 Main Menu", callback_data: "main_menu" }]]
+            }
+          });
+          return;
+        }
+
+        if (studyType === "PYQ Question") {
+          const pyqs = (unitRec && unitRec.pyqQuestions) || [];
+          const body = pyqs.length > 0
+            ? pyqs.map((q, i) => `${i + 1}. ${q}`).join("\n\n")
+            : "Is chapter / unit mein abhi koi PYQ question add nahi hua hai.";
+
+          await axios.post(`${TELEGRAM_API}/sendMessage`, {
+            chat_id: chatId,
+            text: `📝 <b>PYQ QUESTIONS — ${unitName}</b>\n📘 Subject: ${subjectName}\n\n${body}`,
             parse_mode: "HTML",
             reply_markup: {
               inline_keyboard: [[{ text: "🔙 Main Menu", callback_data: "main_menu" }]]
@@ -1158,95 +1332,22 @@ app.post('/webhook', async (req, res) => {
           return;
         }
 
-        const chapButtons = chapters.map((chapName, chIdx) => [
-          { text: `📝 ${chapName}`, callback_data: `chap_${cIdx}_${sIdx}_${yPart}_${semIdx}_${tIdx}_${uIdx}_${chIdx}` }
-        ]);
-        chapButtons.push([{ text: "🔙 Main Menu", callback_data: "main_menu" }]);
+        if (studyType === "Mock Test") {
+          const mocks = (unitRec && unitRec.mockQuestions) || [];
+          const fallbackTopics = (unitRec && unitRec.topics) || [];
+          const body = mocks.length > 0
+            ? mocks.map((q, i) => `Q${i + 1}. ${q}`).join("\n\n")
+            : fallbackTopics.length > 0
+              ? fallbackTopics.map((tp, i) => `Q${i + 1}. Explain "${tp}" with key points and examples.`).join("\n\n")
+              : "Is chapter / unit mein abhi koi Mock Test question available nahi hai.";
 
-        await axios.post(`${TELEGRAM_API}/sendMessage`, {
-          chat_id: chatId,
-          text: `📂 <b>${unitName}</b> (${periodKey} — ${studyType})\n\nTopic / Syllabus Section chunein:`,
-          parse_mode: "HTML",
-          reply_markup: { inline_keyboard: chapButtons }
-        });
-      }
-      // Step 6: Chapter selected -> Show PDFs
-      else if (data.startsWith("chap_")) {
-        const [, cIdxStr, sIdxStr, yPart, semIdxStr, tIdxStr, uIdxStr, chIdxStr] = data.split("_");
-        const cIdx = parseInt(cIdxStr, 10);
-        const sIdx = parseInt(sIdxStr, 10);
-        const semIdx = parseInt(semIdxStr, 10);
-        const tIdx = parseInt(tIdxStr, 10);
-        const uIdx = parseInt(uIdxStr, 10);
-        const chIdx = parseInt(chIdxStr, 10);
-
-        const catName = CATEGORY_LIST[cIdx];
-        const courseName = CATEGORIES[catName][sIdx];
-        const yearName = yPart === "n" ? null : getYearsForCourse(catName, courseName)[parseInt(yPart, 10)];
-        const semName = getSemestersForCourse(catName, courseName, yearName)[semIdx];
-        const studyType = ALLOWED_STUDY_TYPES[tIdx];
-        const periodKey = buildPeriodStorageKey(yearName, semName);
-
-        const bucket = getUnitBucket(catName, courseName, periodKey, studyType, false);
-        const unitName = bucket ? Object.keys(bucket.units)[uIdx] : null;
-        const chapterName = unitName ? Object.keys(bucket.units[unitName].chapters)[chIdx] : null;
-        const pdfs = chapterName ? (bucket.units[unitName].chapters[chapterName] || []) : [];
-
-        await deletePrevMessage();
-
-        if (pdfs.length === 0) {
           await axios.post(`${TELEGRAM_API}/sendMessage`, {
             chat_id: chatId,
-            text: `📝 <b>${chapterName || "Section"}</b>\n\nIs section mein abhi koi PDF available nahi hai.`,
+            text: `🎯 <b>MOCK TEST — ${unitName}</b>\n📘 Subject: ${subjectName}\n\n${body}`,
             parse_mode: "HTML",
             reply_markup: {
               inline_keyboard: [[{ text: "🔙 Main Menu", callback_data: "main_menu" }]]
             }
-          });
-          return;
-        }
-
-        const pdfButtons = pdfs.map((pdf, pIdx) => [
-          { text: `📄 ${pdf.title}`, callback_data: `pdf_${cIdx}_${sIdx}_${yPart}_${semIdx}_${tIdx}_${uIdx}_${chIdx}_${pIdx}` }
-        ]);
-        pdfButtons.push([{ text: "🔙 Main Menu", callback_data: "main_menu" }]);
-
-        await axios.post(`${TELEGRAM_API}/sendMessage`, {
-          chat_id: chatId,
-          text: `📝 <b>${chapterName}</b> (${periodKey})\n\nPDF open / download karne ke liye tap karein:`,
-          parse_mode: "HTML",
-          reply_markup: { inline_keyboard: pdfButtons }
-        });
-      }
-      // Step 7: Send PDF Document
-      else if (data.startsWith("pdf_")) {
-        const [, cIdxStr, sIdxStr, yPart, semIdxStr, tIdxStr, uIdxStr, chIdxStr, pIdxStr] = data.split("_");
-        const cIdx = parseInt(cIdxStr, 10);
-        const sIdx = parseInt(sIdxStr, 10);
-        const semIdx = parseInt(semIdxStr, 10);
-        const tIdx = parseInt(tIdxStr, 10);
-        const uIdx = parseInt(uIdxStr, 10);
-        const chIdx = parseInt(chIdxStr, 10);
-        const pIdx = parseInt(pIdxStr, 10);
-
-        const catName = CATEGORY_LIST[cIdx];
-        const courseName = CATEGORIES[catName][sIdx];
-        const yearName = yPart === "n" ? null : getYearsForCourse(catName, courseName)[parseInt(yPart, 10)];
-        const semName = getSemestersForCourse(catName, courseName, yearName)[semIdx];
-        const studyType = ALLOWED_STUDY_TYPES[tIdx];
-        const periodKey = buildPeriodStorageKey(yearName, semName);
-
-        const bucket = getUnitBucket(catName, courseName, periodKey, studyType, false);
-        const unitName = Object.keys(bucket.units)[uIdx];
-        const chapterName = Object.keys(bucket.units[unitName].chapters)[chIdx];
-        const pdf = bucket.units[unitName].chapters[chapterName][pIdx];
-
-        if (pdf && pdf.fileId) {
-          await axios.post(`${TELEGRAM_API}/sendDocument`, {
-            chat_id: chatId,
-            document: pdf.fileId,
-            caption: `📄 <b>${pdf.title}</b>\n${catName} > ${courseName} > ${periodKey} > ${studyType}\nUnit: ${unitName} | Topic: ${chapterName}`,
-            parse_mode: "HTML"
           });
         }
       }
