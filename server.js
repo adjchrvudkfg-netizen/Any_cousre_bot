@@ -60,7 +60,7 @@ function getState(userId) {
   return userState[userId];
 }
 
-function buildTopMenuInlineKeyboard() {
+function buildBelowCardInlineKeyboard() {
   const inlineKeyboard = MAIN_MENU_BUTTONS.map((row) =>
     row.map((label) => {
       const idx = MAIN_BUTTON_NAMES.indexOf(label);
@@ -107,19 +107,9 @@ function buildStreamKeyboard(category) {
   };
 }
 
-async function sendWelcomeCard(chatId, user) {
+function sendWelcomeCard(chatId, user) {
   const firstName = user.first_name || "Student";
   const roleLabel = isAdmin(user.id) ? "Admin" : "Student";
-
-  // Sirf upar wale inline buttons message mein dikhenge
-  await bot.sendMessage(
-    chatId,
-    "📌 *Select an Option Below:*",
-    {
-      parse_mode: "Markdown",
-      ...buildTopMenuInlineKeyboard()
-    }
-  );
 
   const text = [
     "🌸 - STUDY MATERIAL BOT - 🌸",
@@ -141,10 +131,10 @@ async function sendWelcomeCard(chatId, user) {
     `🎖️ Access: ${roleLabel}`,
     "━━━━━━━━━━━━━━━━━━━━",
     "",
-    "Tap any button above to begin."
+    "Tap any button below to begin."
   ].join("\n");
 
-  return bot.sendMessage(chatId, text);
+  return bot.sendMessage(chatId, text, buildBelowCardInlineKeyboard());
 }
 
 function getAiAssistantReply(queryText, state) {
