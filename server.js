@@ -32,6 +32,18 @@ const ADMIN_IDS = new Set(
 const bot = new TelegramBot(token, { polling: true });
 const userState = {};
 
+const MAIN_BUTTON_NAMES = [
+  "Syllabus",
+  "Hand Written Notes",
+  "PYQ Question",
+  "MCQ Question",
+  "Mock Test",
+  "AI Assistant",
+  "Revision Notes",
+  "Admit Cards Link",
+  "Result Link"
+];
+
 function isAdmin(userId) {
   return ADMIN_IDS.has(Number(userId));
 }
@@ -46,6 +58,24 @@ function getState(userId) {
     };
   }
   return userState[userId];
+}
+
+function buildWelcomeInlineKeyboard() {
+  const inlineKeyboard = MAIN_MENU_BUTTONS.map((row) =>
+    row.map((label) => {
+      const idx = MAIN_BUTTON_NAMES.indexOf(label);
+      return {
+        text: label,
+        callback_data: `MAIN|${idx}`
+      };
+    })
+  );
+
+  return {
+    reply_markup: {
+      inline_keyboard: inlineKeyboard
+    }
+  };
 }
 
 function buildCategoryKeyboard() {
@@ -77,16 +107,7 @@ function buildStreamKeyboard(category) {
   };
 }
 
-function buildMainMenuKeyboard() {
-  return {
-    reply_markup: {
-      keyboard: MAIN_MENU_BUTTONS,
-      resize_keyboard: true
-    }
-  };
-}
-
-function sendWelcomeCard(chatId, user) {
+async function sendWelcomeCard(chatId, user) {
   const firstName = user.first_name || "Student";
   const roleLabel = isAdmin(user.id) ? "Admin" : "Student";
 
@@ -113,7 +134,12 @@ function sendWelcomeCard(chatId, user) {
     "Tap any button below to begin."
   ].join("\n");
 
-  return bot.sendMessage(chatId, text, buildMainMenuKeyboard());
+  // Pehle neeche ka old bottom reply keyboard clear karein (agar khula ho)
+  await bot.sendMessage(chatId, "🔄 Loading Study Material menu...", {
+    reply_markup: { remove_keyboard: true }
+  }).catch(() => {});
+
+  return bot.sendMessage(chatId, text, buildWelcomeInlineKeyboard());
 }
 
 function getAiAssistantReply(queryText, state) {
@@ -131,6 +157,19 @@ function getAiAssistantReply(queryText, state) {
     "📄 Note: Official PDFs ke liye *Hand Written Notes*, *PYQ Question*, *MCQ Question*, *Mock Test*, ya *Revision Notes* section check karein."
   ].join("\n");
 }
+
+function openCategorySelection(chatId, userId, typeName) {
+  const state = getState(userId);
+  state.selectedType = typeName;
+  state.selectedCategory = null;
+  state.selectedStream = null;
+
+  return bot.sendMessage(
+    chatId,
+    `📚 *${typeName}* select kiya gaya.\n👇 Apni Category chunein:`,
+    { parse_mode: "Markdown", ...buildCategoryKeyboard() }
+  );
+}
 bot.onText(/\/start/, (msg) => {
   const userId = msg.from.id;
   userState[userId] = {
@@ -145,7 +184,7 @@ bot.onText(/\/start/, (msg) => {
 bot.onText(/\/cancel/, (msg) => {
   const state = getState(msg.from.id);
   state.adminFlow = null;
-  bot.sendMessage(msg.chat.id, "❌ Current action cancelled.", buildMainMenuKeyboard());
+  sendWelcomeCard(msg.chat.id, msg.from);
 });
 
 // Admin Command: /add_unit Category | Stream | StudyType | UnitName
@@ -338,11 +377,22 @@ bot.on("document", (msg) => {
   );
 });
 
-// Inline callbacks for Units, Chapters & PDFs
+// Inline callbacks for Welcome Buttons, Units, Chapters & PDFs
 bot.on("callback_query", (query) => {
   const chatId = query.message.chat.id;
+  const userId = query.from.id;
   const dataStr = query.data || "";
   const data = loadData();
+
+  if (dataStr.startsWith("MAIN|")) {
+    const [, idxStr] = dataStr.split("|");
+    const typeName = MAIN_BUTTON_NAMES[Number(idxStr)];
+    if (!typeName) {
+      return bot.answerCallbackQuery(query.id, { text: "Option nahi mila." });
+    }
+    bot.answerCallbackQuery(query.id);
+    return openCategorySelection(chatId, userId, typeName);
+  }
 
   if (dataStr.startsWith("UNIT|")) {
     const [, cIdx, sIdx, tIdx, uIdx] = dataStr.split("|").map(Number);
@@ -468,28 +518,8 @@ bot.on("message", (msg) => {
     );
   }
 
-  const mainButtonNames = [
-    "Syllabus",
-    "Hand Written Notes",
-    "PYQ Question",
-    "MCQ Question",
-    "Mock Test",
-    "AI Assistant",
-    "Revision Notes",
-    "Admit Cards Link",
-    "Result Link"
-  ];
-
-  if (mainButtonNames.includes(text)) {
-    state.selectedType = text;
-    state.selectedCategory = null;
-    state.selectedStream = null;
-
-    return bot.sendMessage(
-      chatId,
-      `📚 *${text}* select kiya gaya.\n👇 Apni Category chunein:`,
-      { parse_mode: "Markdown", ...buildCategoryKeyboard() }
-    );
+  if (MAIN_BUTTON_NAMES.includes(text)) {
+    return openCategorySelection(chatId, userId, text);
   }
 
   if (CATEGORY_LIST.includes(text)) {
@@ -589,11 +619,7 @@ bot.on("message", (msg) => {
     });
   }
 
-  return bot.sendMessage(
-    chatId,
-    "👇 Kripya neeche diye gaye buttons ka use karein ya `/start` bhejein.",
-    buildMainMenuKeyboard()
-  );
+  return sendWelcomeCard(chatId, msg.from);
 });
 
 console.log("STUDY MATERIAL BOT (server.js) is running...");
