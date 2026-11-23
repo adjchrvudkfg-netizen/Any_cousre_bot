@@ -35,7 +35,6 @@ const ADMIN_IDS = new Set([
     .map((id) => Number(String(id).trim()))
     .filter((id) => !Number.isNaN(id) && id > 0)
 ]);
-
 const SUPPORT_CHANNEL = process.env.SUPPORT_CHANNEL || config.SUPPORT_CHANNEL || "https://t.me/adityachoudhary5";
 
 const dbFilePath = path.join(__dirname, 'study_material_db.json');
@@ -120,7 +119,6 @@ const DEFAULT_DIRECT_SEMESTERS_BY_COURSE = {
   "Agniveer SSR": ["Stage 1"],
   "Agniveer MR": ["Stage 1"]
 };
-
 let studyDb = {
   materials: {},
   uploadedPdfs: [],
@@ -241,7 +239,33 @@ function getYearsForCourse(category, course) {
 
 function getSemestersForCourse(category, course, yearName = null) {
   const key = yearName
-    ? `${category}::${course}::${yearName}` : `${category}::${course}`;  let baseSems = []; if (yearName && DEFAULT_SEMESTERS_BY_YEAR[course] && DEFAULT_SEMESTERS_BY_YEAR[course][yearName]) { baseSems = [...DEFAULT_SEMESTERS_BY_YEAR[course][yearName]]; } else if (!yearName && DEFAULT_DIRECT_SEMESTERS_BY_COURSE[course]) { baseSems = [...DEFAULT_DIRECT_SEMESTERS_BY_COURSE[course]]; } else if (!yearName && !DEFAULT_YEARS_BY_COURSE[course]) { baseSems = ["Semester 1", "Semester 2"]; }  const extraSems = studyDb.customSemesters[key] \vert{}\vert{} []; const merged = [...baseSems];  if (!yearName && studyDb.materials[category] && studyDb.materials[category][course]) { for (const semKey of Object.keys(studyDb.materials[category][course])) { if (!semKey.includes(" > ") && !merged.includes(semKey)) { merged.push(semKey); } } } else if (yearName && studyDb.materials[category] && studyDb.materials[category][course]) { const prefix = `${yearName} > `;
+    ? `${category}::${course}::${yearName}`
+    : `${category}::${course}`;
+
+  let baseSems = [];
+  if (
+    yearName &&
+    DEFAULT_SEMESTERS_BY_YEAR[course] &&
+    DEFAULT_SEMESTERS_BY_YEAR[course][yearName]
+  ) {
+    baseSems = [...DEFAULT_SEMESTERS_BY_YEAR[course][yearName]];
+  } else if (!yearName && DEFAULT_DIRECT_SEMESTERS_BY_COURSE[course]) {
+    baseSems = [...DEFAULT_DIRECT_SEMESTERS_BY_COURSE[course]];
+  } else if (!yearName && !DEFAULT_YEARS_BY_COURSE[course]) {
+    baseSems = ["Semester 1", "Semester 2"];
+  }
+
+  const extraSems = studyDb.customSemesters[key] || [];
+  const merged = [...baseSems];
+
+  if (!yearName && studyDb.materials[category] && studyDb.materials[category][course]) {
+    for (const semKey of Object.keys(studyDb.materials[category][course])) {
+      if (!semKey.includes(" > ") && !merged.includes(semKey)) {
+        merged.push(semKey);
+      }
+    }
+  } else if (yearName && studyDb.materials[category] && studyDb.materials[category][course]) {
+    const prefix = `${yearName} > `;
     for (const fullKey of Object.keys(studyDb.materials[category][course])) {
       if (fullKey.startsWith(prefix)) {
         const semOnly = fullKey.slice(prefix.length);
@@ -258,7 +282,7 @@ function getSemestersForCourse(category, course, yearName = null) {
 }
 
 function buildPeriodStorageKey(yearName, semesterName) {
-  return yearName ? `${yearName} >${semesterName}` : semesterName;
+  return yearName ? `${yearName} > ${semesterName}` : semesterName;
 }
 
 function getSubjectBucket(category, course, periodKey, studyType, createIfMissing = false) {
@@ -441,7 +465,6 @@ function buildHandwrittenPreview(rawText, title, lang) {
   const msgs = buildHandwrittenMessages(rawText, title, lang);
   return msgs[0];
 }
-
 function searchAdminPdfsForQuery(query) {
   const qLower = (query || "").toLowerCase();
   const keywords = qLower
@@ -586,6 +609,30 @@ ${mockSectionText}
     return (
 `🤖 *AI Assistant — Handwritten Study Response*
 🔎 *Topic Queried:* *${query}*
+📂 *Source (From Admin PDFs):* ${sourceLabel} (Total PDFs: ${studyDb.uploadedPdfs.length})
+
+${handwrittenSnippet}
+
+❓ *Types of Questions That Can Be Asked:*
+  • *Short Answer (2–3 Marks):* Definitions, core terms, or concise differences.
+  • *Long / Structured Answer (5–10 Marks):* Detailed explanation, classification, mechanisms, or steps.
+  • *MCQs & Case/Application Questions:* Concept checks, real-world scenarios, and exceptions.
+
+📌 *Questions Already Available (PYQ / Mock):*
+${pyqSectionText}
+${mockSectionText}
+
+✍️ *How to Write the Answer in Exams:*
+  1. *Definition / Intro:* Start with a clear, concise definition.
+  2. *Structured Points / Classification:* Use headings or bullet points with key terms.
+  3. *Examples / Diagrams:* Add examples or a simple flow/diagram where helpful.
+  4. *Summary:* Conclude with a brief wrap-up line.`
+    );
+  }
+
+  return (
+`🤖 *AI Assistant — Hand Written Style Explanation*
+🔎 *Topic:* *${query}*
 📂 *PDF Search Source:* ${sourceLabel} (Total Admin PDFs: ${studyDb.uploadedPdfs.length})
 
 ${handwrittenSnippet}
