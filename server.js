@@ -231,29 +231,7 @@ function getYearsForCourse(category, course) {
 
 function getSemestersForCourse(category, course, yearName = null) {
   const key = yearName
-    ? `${category}::${course}::${yearName}`
-    : `${category}::${course}`;
-
-  let baseSems = [];
-  if (yearName && DEFAULT_SEMESTERS_BY_YEAR[course] && DEFAULT_SEMESTERS_BY_YEAR[course][yearName]) {
-    baseSems = [...DEFAULT_SEMESTERS_BY_YEAR[course][yearName]];
-  } else if (!yearName && DEFAULT_DIRECT_SEMESTERS_BY_COURSE[course]) {
-    baseSems = [...DEFAULT_DIRECT_SEMESTERS_BY_COURSE[course]];
-  } else if (!yearName && !DEFAULT_YEARS_BY_COURSE[course]) {
-    baseSems = ["Semester 1", "Semester 2"];
-  }
-
-  const extraSems = studyDb.customSemesters[key] || [];
-  const merged = [...baseSems];
-
-  if (!yearName && studyDb.materials[category] && studyDb.materials[category][course]) {
-    for (const semKey of Object.keys(studyDb.materials[category][course])) {
-      if (!semKey.includes(" > ") && !merged.includes(semKey)) {
-        merged.push(semKey);
-      }
-    }
-  } else if (yearName && studyDb.materials[category] && studyDb.materials[category][course]) {
-    const prefix = `${yearName} > `;
+    ? `${category}::${course}::${yearName}` : `${category}::${course}`;  let baseSems = []; if (yearName && DEFAULT_SEMESTERS_BY_YEAR[course] && DEFAULT_SEMESTERS_BY_YEAR[course][yearName]) { baseSems = [...DEFAULT_SEMESTERS_BY_YEAR[course][yearName]]; } else if (!yearName && DEFAULT_DIRECT_SEMESTERS_BY_COURSE[course]) { baseSems = [...DEFAULT_DIRECT_SEMESTERS_BY_COURSE[course]]; } else if (!yearName && !DEFAULT_YEARS_BY_COURSE[course]) { baseSems = ["Semester 1", "Semester 2"]; }  const extraSems = studyDb.customSemesters[key] \vert{}\vert{} []; const merged = [...baseSems];  if (!yearName && studyDb.materials[category] && studyDb.materials[category][course]) { for (const semKey of Object.keys(studyDb.materials[category][course])) { if (!semKey.includes(" > ") && !merged.includes(semKey)) { merged.push(semKey); } } } else if (yearName && studyDb.materials[category] && studyDb.materials[category][course]) { const prefix = `${yearName} > `;
     for (const fullKey of Object.keys(studyDb.materials[category][course])) {
       if (fullKey.startsWith(prefix)) {
         const semOnly = fullKey.slice(prefix.length);
@@ -270,7 +248,7 @@ function getSemestersForCourse(category, course, yearName = null) {
 }
 
 function buildPeriodStorageKey(yearName, semesterName) {
-  return yearName ? `${yearName} > ${semesterName}` : semesterName;
+  return yearName ? `${yearName} >${semesterName}` : semesterName;
 }
 
 function getSubjectBucket(category, course, periodKey, studyType, createIfMissing = false) {
@@ -340,52 +318,110 @@ function detectLanguage(text) {
   return "english";
 }
 
-function buildHandwrittenMessages(rawText, title, lang) {
-  const cleanLines = (rawText || "")
-    .split(/\r?\n/)
-    .map((l) => l.replace(/\s+/g, " ").trim())
-    .filter(Boolean);
+function escapeMarkdownText(str) {
+  return String(str || "").replace(/([_*`\[])/g, "\\$1");
+}
 
-  if (cleanLines.length === 0) {
-    if (lang === "hindi") {
-      return [`✍️ *हस्तलिखित नोट्स — ${title}*\n\n  ✍️ • अभी इस भाग के नोट्स अपडेट किए जा रहे हैं।`];
+function isLikelyHeading(line) {
+  const trimmed = line.trim();
+  if (!trimmed || trimmed.length > 85) return false;
+  if (/^(unit[\s\-–—:]*\d+|chapter[\s\-–—:]*\d+|\d+\s*\|\s*p\s*a\s*g\s*e|page\s*\d+)/i.test(trimmed)) {
+    return false;
+  }
+  if (trimmed.endsWith(":")) return true;
+  if (/^\d+[\).\s-]/.test(trimmed)) return false;
+  if (/^[a-dA-D]\)\s*/.test(trimmed)) return false;
+  const wordCount = trimmed.split(/\s+/).length;
+  return wordCount >= 1 && wordCount <= 7 && !trimmed.endsWith(".");
+}
+
+function isSubPoint(line) {
+  return /^(\d+[\).\s-]|[a-dA-D]\)\s*|[-–•●▪◦]\s*)/.test(line.trim());
+}
+
+function cleanPdfLine(rawLine) {
+  let s = String(rawLine || "")
+    .replace(/[\u2022\u25CF\u25AA\u25AB\u25E6\uF0B7]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  if (/^\d+\s*\|\s*p\s*a\s*g\s*e$/i.test(s)) {
+    return "";
+  }
+  if (/^unit[\s\-–—]*[ivx0-9]+$/i.test(s)) {
+    return "";
+  }
+  return s;
+}
+
+function buildHandwrittenMessages(rawText, title, lang) {
+  const rawLines = (rawText || "").split(/\r?\n/);
+  const cleanedLines = rawLines.map(cleanPdfLine).filter(Boolean);
+
+  const titleParts = String(title || "").split("—");
+  const unitPart = titleParts.length > 1 ? titleParts.slice(1).join("—").trim() : String(title || "").trim();
+  const unitMatch = unitPart.match(/^(unit\s*\d+)\s*[-–—:]\s*(.+)$/i);
+
+  const unitLabel = unitMatch
+    ? `${escapeMarkdownText(unitMatch[1].replace(/\b\w/g, (c) => c.toUpperCase()))}: *${escapeMarkdownText(unitMatch[2].trim())}*`
+    : `*${escapeMarkdownText(unitPart)}*`;
+
+  if (cleanedLines.length === 0) {
+    const emptyMsg =
+      lang === "hindi"
+        ? `📌 ${unitLabel}\n\n✍️ *हस्तलिखित नोट्स:*\n  • अभी इस इकाई के नोट्स उपलब्ध नहीं हैं।`
+        : lang === "english"
+          ? `📌 ${unitLabel}\n\n✍️ *Handwritten Notes:*\n  • Notes for this unit are currently being updated.`
+          : `📌 ${unitLabel}\n\n✍️ *Hand Written Notes:*\n  • Is unit ke notes abhi update kiye ja rahe hain.`;
+    return [emptyMsg];
+  }
+
+  const formattedBodyLines = [];
+  for (const line of cleanedLines) {
+    const safeLine = escapeMarkdownText(line);
+    if (isLikelyHeading(line)) {
+      const cleanHeading = safeLine.replace(/:$/, "");
+      formattedBodyLines.push(`\n*📌 ${cleanHeading}*`);
+    } else if (isSubPoint(line)) {
+      const strippedPoint = safeLine
+        .replace(/^(\d+[\).\s-]|[a-dA-D]\)\s*|[-–•●▪◦]\s*)+/, "")
+        .trim();
+      formattedBodyLines.push(`  ✍️ • ${strippedPoint || safeLine}`);
+    } else {
+      formattedBodyLines.push(`  ✍️ ${safeLine}`);
     }
-    if (lang === "english") {
-      return [`✍️ *Handwritten Notebook Notes — ${title}*\n\n  ✍️ • Notebook content for this section is being updated.`];
-    }
-    return [`✍️ *Hand Written Notes — ${title}*\n\n  ✍️ • Is topic ke haath se likhe hue notes update kiye ja rahe hain.`];
   }
 
   const header =
     lang === "hindi"
-      ? `✍️ *हस्तलिखित नोट्स (पूरी PDF — Notebook Style)*\n📌 *शीर्षक:* ${title}\n──────────────────────\n`
+      ? `📚 ${unitLabel}\n──────────────────────\n✍️ *हस्तलिखित नोट्स (PDF अनुसार)*\n`
       : lang === "english"
-        ? `✍️ *Handwritten Notebook Notes (Full PDF)*\n📌 *Topic:* ${title}\n──────────────────────\n`
-        : `✍️ *Hand Written Notes (Poori PDF — Notebook Style)*\n📌 *Topic:* ${title}\n──────────────────────\n`;
+        ? `📚 ${unitLabel}\n──────────────────────\n✍️ *Handwritten Notes (As per PDF)*\n`
+        : `📚 ${unitLabel}\n──────────────────────\n✍️ *Hand Written Notes (PDF Ke Hisaab Se)*\n`;
 
   const footer =
     lang === "hindi"
-      ? `\n──────────────────────\n📝 *परीक्षा टिप:* मुख्य परिभाषा, वर्गीकरण और उदाहरण साफ अक्षरों में लिखें।`
+      ? `\n──────────────────────\n📝 *परीक्षा टिप:* मुख्य हेडिंग, परिभाषा और बिंदु साफ-सुथरे ढंग से लिखें।`
       : lang === "english"
-        ? `\n──────────────────────\n📝 *Exam Tip:* Highlight definitions, key points/classifications, and neat examples.`
-        : `\n──────────────────────\n📝 *Exam Tip:* Definition, main points/classification, aur examples saaf tarike se likhein.`;
+        ? `\n──────────────────────\n📝 *Exam Tip:* Write clear headings, definitions, and structured points.`
+        : `\n──────────────────────\n📝 *Exam Tip:* Main headings, definitions, aur points saaf tarike se likhein.`;
 
-  const maxChunkLen = 3400;
+  const maxChunkLen = 3350;
   const chunks = [];
   let current = header;
 
-  for (const line of cleanLines) {
-    const wrappedLine = `  ✍️ • ${line}\n`;
-    if ((current + wrappedLine).length > maxChunkLen) {
-      chunks.push(current + footer);
-      current = `${header}${wrappedLine}`;
+  for (const entry of formattedBodyLines) {
+    const block = `${entry}\n`;
+    if ((current + block).length > maxChunkLen) {
+      chunks.push(`${current.trimEnd()}${footer}`);
+      current = `${header}${block}`;
     } else {
-      current += wrappedLine;
+      current += block;
     }
   }
 
   if (current.trim().length > 0) {
-    chunks.push(current + footer);
+    chunks.push(`${current.trimEnd()}${footer}`);
   }
 
   return chunks;
@@ -903,6 +939,38 @@ app.post('/webhook', async (req, res) => {
           parse_mode: "HTML"
         });
       }
+      else if (text.startsWith('/del_unit')) {
+        if (!isAdmin(from.id)) return;
+        const parts = text.replace('/del_unit', '').trim().split('|').map((s) => s.trim());
+        if (parts.length < 7) {
+          await axios.post(`${TELEGRAM_API}/sendMessage`, {
+            chat_id: chatId,
+            text: "⚠️ Use: <code>/del_unit Category | Course | Year (or -) | Semester | StudyType | Subject | UnitName</code>",
+            parse_mode: "HTML"
+          });
+          return;
+        }
+        const [category, course, yearRaw, semester, studyType, subjectName, unitName] = parts;
+        const yearName = (!yearRaw || yearRaw === "-" || yearRaw.toLowerCase() === "none") ? null : yearRaw;
+        const periodKey = buildPeriodStorageKey(yearName, semester);
+
+        const bucket = getSubjectBucket(category, course, periodKey, studyType, false);
+        if (bucket && bucket.subjects[subjectName] && bucket.subjects[subjectName].units && bucket.subjects[subjectName].units[unitName]) {
+          delete bucket.subjects[subjectName].units[unitName];
+          saveData();
+          await axios.post(`${TELEGRAM_API}/sendMessage`, {
+            chat_id: chatId,
+            text: `🗑️ <b>Unit Removed:</b> <code>${unitName}</code> (${subjectName})`,
+            parse_mode: "HTML"
+          });
+        } else {
+          await axios.post(`${TELEGRAM_API}/sendMessage`, {
+            chat_id: chatId,
+            text: "⚠️ Ye unit nahi mili. Spelling/format check karein.",
+            parse_mode: "HTML"
+          });
+        }
+      }
       else if (text.startsWith('/addupdate')) {
         if (!isAdmin(from.id)) return;
         const updateMsg = text.replace('/addupdate', '').trim();
@@ -1096,38 +1164,6 @@ Bot admin ki uploaded PDFs mein se topic dhoondh kar:
         });
       }
       else if (data.startsWith("yr_")) {
-        const [, cIdxStr, sIdxStr, yIdxStr] = data.split("_");
-        const cIdx = parseInt(cIdxStr, 10);
-        const sIdx = parseInt(sIdxStr, 10);
-        const yIdx = parseInt(yIdxStr, 10);
-
-        const catName = CATEGORY_LIST[cIdx];
-        const courseName = CATEGORIES[catName][sIdx];
-        const yearName = getYearsForCourse(catName, courseName)[yIdx];
-        const studyType = user.selectedType || "Syllabus";
-
-        user.selectedCategory = catName;
-        user.selectedStream = courseName;
-        user.selectedYear = yearName;
-        user.selectedSemester = null;
-        saveData();
-
-        await deletePrevMessage();
-
-        const sems = getSemestersForCourse(catName, courseName, yearName);
-        const semButtons = sems.map((semName, semIdx) => [
-          { text: `🗓️ ${semName}`, callback_data: `sem_${cIdx}_${sIdx}_${yIdx}_${semIdx}` }
-        ]);
-        semButtons.push([{ text: "🔙 Main Menu", callback_data: "main_menu" }]);
-
-        await axios.post(`${TELEGRAM_API}/sendMessage`, {
-          chat_id: chatId,
-          text: `🎓 <b>${courseName} — ${yearName}</b>\n📚 Module: <b>${studyType}</b>\n\nApna <b>Semester</b> chunein:`,
-          parse_mode: "HTML",
-          reply_markup: { inline_keyboard: semButtons }
-        });
-      }
-      else if (data.startsWith("sem_")) {
         const [, cIdxStr, sIdxStr, yPart, semIdxStr] = data.split("_");
         const cIdx = parseInt(cIdxStr, 10);
         const sIdx = parseInt(sIdxStr, 10);
