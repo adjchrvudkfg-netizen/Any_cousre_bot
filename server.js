@@ -2,7 +2,13 @@ const express = require('express');
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
-const config = require('./config');
+
+let config = {};
+try {
+  config = require('./config');
+} catch (e) {
+  config = {};
+}
 
 let pdfParse = null;
 try {
@@ -14,16 +20,21 @@ try {
 const app = express();
 app.use(express.json());
 
-const TOKEN = config.TELEGRAM_BOT_TOKEN;
+const TOKEN = process.env.TELEGRAM_BOT_TOKEN || config.TELEGRAM_BOT_TOKEN || "";
+if (!TOKEN) {
+  console.error("❌ Missing TELEGRAM_BOT_TOKEN in environment or config.js");
+  process.exit(1);
+}
+
 const TELEGRAM_API = `https://api.telegram.org/bot${TOKEN}`;
 const ADMIN_IDS = new Set([
   8805135936,
-  ...(config.ADMIN_IDS || process.env.ADMIN_IDS || '')
+  ...(process.env.ADMIN_IDS || config.ADMIN_IDS || '')
     .split(',')
     .map((id) => Number(id.trim()))
     .filter((id) => !Number.isNaN(id) && id > 0)
 ]);
-const SUPPORT_CHANNEL = config.SUPPORT_CHANNEL || process.env.SUPPORT_CHANNEL || "https://t.me/adityachoudhary5";
+const SUPPORT_CHANNEL = process.env.SUPPORT_CHANNEL || config.SUPPORT_CHANNEL || "https://t.me/adityachoudhary5";
 
 const dbFilePath = path.join(__dirname, 'study_material_db.json');
 
@@ -120,9 +131,6 @@ let studyDb = {
   users: {}
 };
 
-// =====================================
-// AUTOMATIC BUTTON COLOR SYSTEM
-// =====================================
 axios.interceptors.request.use((request) => {
   try {
     const data = request.data;
@@ -576,30 +584,6 @@ ${mockSectionText}
     return (
 `🤖 *AI Assistant — Handwritten Study Response*
 🔎 *Topic Queried:* *${query}*
-📂 *Source (From Admin PDFs):* ${sourceLabel} (Total PDFs: ${studyDb.uploadedPdfs.length})
-
-${handwrittenSnippet}
-
-❓ *Types of Questions That Can Be Asked:*
-  • *Short Answer (2–3 Marks):* Definitions, core terms, or concise differences.
-  • *Long / Structured Answer (5–10 Marks):* Detailed explanation, classification, mechanisms, or steps.
-  • *MCQs & Case/Application Questions:* Concept checks, real-world scenarios, and exceptions.
-
-📌 *Questions Already Available (PYQ / Mock):*
-${pyqSectionText}
-${mockSectionText}
-
-✍️ *How to Write the Answer in Exams:*
-  1. *Definition / Intro:* Start with a clear, concise definition.
-  2. *Structured Points / Classification:* Use headings or bullet points with key terms.
-  3. *Examples / Diagrams:* Add examples or a simple flow/diagram where helpful.
-  4. *Summary:* Conclude with a brief wrap-up line.`
-    );
-  }
-
-  return (
-`🤖 *AI Assistant — Hand Written Style Explanation*
-🔎 *Topic:* *${query}*
 📂 *PDF Search Source:* ${sourceLabel} (Total Admin PDFs: ${studyDb.uploadedPdfs.length})
 
 ${handwrittenSnippet}
@@ -667,6 +651,7 @@ function getMainMenuMarkup(user) {
 app.get('/', (req, res) => {
   res.status(200).send('STUDY MATERIAL BOT server is running.');
 });
+
 app.post('/webhook', async (req, res) => {
   res.sendStatus(200);
   const update = req.body;
@@ -1164,6 +1149,38 @@ Bot admin ki uploaded PDFs mein se topic dhoondh kar:
         });
       }
       else if (data.startsWith("yr_")) {
+        const [, cIdxStr, sIdxStr, yIdxStr] = data.split("_");
+        const cIdx = parseInt(cIdxStr, 10);
+        const sIdx = parseInt(sIdxStr, 10);
+        const yIdx = parseInt(yIdxStr, 10);
+
+        const catName = CATEGORY_LIST[cIdx];
+        const courseName = CATEGORIES[catName][sIdx];
+        const yearName = getYearsForCourse(catName, courseName)[yIdx];
+        const studyType = user.selectedType || "Syllabus";
+
+        user.selectedCategory = catName;
+        user.selectedStream = courseName;
+        user.selectedYear = yearName;
+        user.selectedSemester = null;
+        saveData();
+
+        await deletePrevMessage();
+
+        const sems = getSemestersForCourse(catName, courseName, yearName);
+        const semButtons = sems.map((semName, semIdx) => [
+          { text: `🗓️ ${semName}`, callback_data: `sem_${cIdx}_${sIdx}_${yIdx}_${semIdx}` }
+        ]);
+        semButtons.push([{ text: "🔙 Main Menu", callback_data: "main_menu" }]);
+
+        await axios.post(`${TELEGRAM_API}/sendMessage`, {
+          chat_id: chatId,
+          text: `🎓 <b>${courseName} — ${yearName}</b>\n📚 Module: <b>${studyType}</b>\n\nApna <b>Semester</b> chunein:`,
+          parse_mode: "HTML",
+          reply_markup: { inline_keyboard: semButtons }
+        });
+      }
+      else if (data.startsWith("sem_")) {
         const [, cIdxStr, sIdxStr, yPart, semIdxStr] = data.split("_");
         const cIdx = parseInt(cIdxStr, 10);
         const sIdx = parseInt(sIdxStr, 10);
