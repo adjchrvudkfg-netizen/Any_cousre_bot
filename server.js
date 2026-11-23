@@ -43,21 +43,18 @@ const ALLOWED_STUDY_TYPES = [
   "Syllabus",
   "Hand Written Notes",
   "PYQ Question",
-  "MCQ Question",
   "Mock Test",
-  "AI Assistant",
-  "Revision Notes"
+  "AI Assistant"
 ];
 
 const MAIN_MENU_BUTTONS = [
   ["Syllabus", "Hand Written Notes"],
-  ["PYQ Question", "MCQ Question"],
-  ["Mock Test", "AI Assistant"],
-  ["Revision Notes", "Admit Cards Link"],
+  ["PYQ Question", "Mock Test"],
+  ["AI Assistant", "Admit Cards Link"],
   ["Result Link"]
 ];
 
-const CATEGORIES = {
+let CATEGORIES = {
   "Pharmacy": ["B.Pharma", "D.Pharma"],
   "Commerce": ["B.Com"],
   "CET": ["CET 12th Level", "CET Graduation Level"],
@@ -68,8 +65,6 @@ const CATEGORIES = {
   "Army": ["Agniveer GD", "Agniveer Technical", "Nursing Assistant", "Clerk / SKT"],
   "Navy": ["Agniveer SSR", "Agniveer MR"]
 };
-
-const CATEGORY_LIST = Object.keys(CATEGORIES);
 
 const DEFAULT_YEARS_BY_COURSE = {
   "B.Pharma": ["1st Year", "2nd Year", "3rd Year", "4th Year"],
@@ -119,6 +114,7 @@ const DEFAULT_DIRECT_SEMESTERS_BY_COURSE = {
   "Agniveer SSR": ["Stage 1"],
   "Agniveer MR": ["Stage 1"]
 };
+
 let studyDb = {
   materials: {},
   uploadedPdfs: [],
@@ -130,45 +126,6 @@ let studyDb = {
   },
   users: {}
 };
-
-axios.interceptors.request.use((request) => {
-  try {
-    const data = request.data;
-    if (
-      data &&
-      typeof data === "object" &&
-      data.reply_markup &&
-      Array.isArray(data.reply_markup.inline_keyboard)
-    ) {
-      data.reply_markup.inline_keyboard =
-        data.reply_markup.inline_keyboard.map((row) =>
-          row.map((button) => {
-            const text = button.text || "";
-            const callback = button.callback_data || "";
-            let style = "success";
-
-            if (
-              text.includes("Syllabus") ||
-              text.includes("Hand Written Notes") ||
-              text.includes("Year") ||
-              text.includes("Semester")
-            ) {
-              style = "primary";
-            } else if (text.includes("Back") || text.includes("Main Menu")) {
-              style = "danger";
-            } else if (callback.startsWith("yr_") || callback.startsWith("sem_") || callback.startsWith("subj_")) {
-              style = "success";
-            }
-
-            return { ...button, style };
-          })
-        );
-    }
-  } catch (error) {
-    console.log("Button color error:", error.message);
-  }
-  return request;
-});
 
 function saveData() {
   try {
@@ -183,6 +140,9 @@ try {
     const raw = fs.readFileSync(dbFilePath, 'utf8');
     if (raw && raw.trim().length > 0) {
       const parsed = JSON.parse(raw);
+      if (parsed.categories && typeof parsed.categories === "object") {
+        CATEGORIES = parsed.categories;
+      }
       if (parsed.materials) studyDb.materials = parsed.materials;
       if (parsed.uploadedPdfs) studyDb.uploadedPdfs = parsed.uploadedPdfs;
       if (parsed.customYears) studyDb.customYears = parsed.customYears;
@@ -203,6 +163,19 @@ try {
   console.log("⚠️ Error loading database, using default:", e.message);
 }
 
+function persistAll() {
+  try {
+    const payload = { ...studyDb, categories: CATEGORIES };
+    fs.writeFileSync(dbFilePath, JSON.stringify(payload, null, 2), 'utf8');
+  } catch (e) {
+    console.log("❌ Error persisting database:", e.message);
+  }
+}
+
+function getCategoryList() {
+  return Object.keys(CATEGORIES);
+}
+
 function isAdmin(userId) {
   return ADMIN_IDS.has(Number(userId));
 }
@@ -217,11 +190,15 @@ function getUser(userId, firstName) {
       selectedStream: null,
       selectedYear: null,
       selectedSemester: null,
-      adminUploadFlow: null
+      adminUploadFlow: null,
+      activeMockSession: null
     };
-    saveData();
-  } else if (firstName) {
-    studyDb.users[userId].name = firstName;
+    persistAll();
+  } else {
+    if (firstName) studyDb.users[userId].name = firstName;
+    if (!studyDb.users[userId].activeMockSession) {
+      studyDb.users[userId].activeMockSession = null;
+    }
   }
   return studyDb.users[userId];
 }
@@ -239,33 +216,7 @@ function getYearsForCourse(category, course) {
 
 function getSemestersForCourse(category, course, yearName = null) {
   const key = yearName
-    ? `${category}::${course}::${yearName}`
-    : `${category}::${course}`;
-
-  let baseSems = [];
-  if (
-    yearName &&
-    DEFAULT_SEMESTERS_BY_YEAR[course] &&
-    DEFAULT_SEMESTERS_BY_YEAR[course][yearName]
-  ) {
-    baseSems = [...DEFAULT_SEMESTERS_BY_YEAR[course][yearName]];
-  } else if (!yearName && DEFAULT_DIRECT_SEMESTERS_BY_COURSE[course]) {
-    baseSems = [...DEFAULT_DIRECT_SEMESTERS_BY_COURSE[course]];
-  } else if (!yearName && !DEFAULT_YEARS_BY_COURSE[course]) {
-    baseSems = ["Semester 1", "Semester 2"];
-  }
-
-  const extraSems = studyDb.customSemesters[key] || [];
-  const merged = [...baseSems];
-
-  if (!yearName && studyDb.materials[category] && studyDb.materials[category][course]) {
-    for (const semKey of Object.keys(studyDb.materials[category][course])) {
-      if (!semKey.includes(" > ") && !merged.includes(semKey)) {
-        merged.push(semKey);
-      }
-    }
-  } else if (yearName && studyDb.materials[category] && studyDb.materials[category][course]) {
-    const prefix = `${yearName} > `;
+    ? `${category}::${course}::${yearName}` : `${category}::${course}`;  let baseSems = []; if ( yearName && DEFAULT_SEMESTERS_BY_YEAR[course] && DEFAULT_SEMESTERS_BY_YEAR[course][yearName] ) { baseSems = [...DEFAULT_SEMESTERS_BY_YEAR[course][yearName]]; } else if (!yearName && DEFAULT_DIRECT_SEMESTERS_BY_COURSE[course]) { baseSems = [...DEFAULT_DIRECT_SEMESTERS_BY_COURSE[course]]; } else if (!yearName && !DEFAULT_YEARS_BY_COURSE[course]) { baseSems = ["Semester 1", "Semester 2"]; }  const extraSems = studyDb.customSemesters[key] \vert{}\vert{} []; const merged = [...baseSems];  if (!yearName && studyDb.materials[category] && studyDb.materials[category][course]) { for (const semKey of Object.keys(studyDb.materials[category][course])) { if (!semKey.includes(" > ") && !merged.includes(semKey)) { merged.push(semKey); } } } else if (yearName && studyDb.materials[category] && studyDb.materials[category][course]) { const prefix = `${yearName} > `;
     for (const fullKey of Object.keys(studyDb.materials[category][course])) {
       if (fullKey.startsWith(prefix)) {
         const semOnly = fullKey.slice(prefix.length);
@@ -282,7 +233,7 @@ function getSemestersForCourse(category, course, yearName = null) {
 }
 
 function buildPeriodStorageKey(yearName, semesterName) {
-  return yearName ? `${yearName} > ${semesterName}` : semesterName;
+  return yearName ? `${yearName} >${semesterName}` : semesterName;
 }
 
 function getSubjectBucket(category, course, periodKey, studyType, createIfMissing = false) {
@@ -325,35 +276,37 @@ function ensureUnitRecord(category, course, periodKey, studyType, subjectName, u
       topics: [],
       handwrittenNotes: "",
       pyqQuestions: [],
-      mcqQuestions: [],
+      pyqStructured: {
+        mcq: [],
+        short: [],
+        long: []
+      },
       mockQuestions: [],
-      revisionNotes: ""
+      mockMcqSet: []
     };
+  }
+  if (!bucket.subjects[subjectName].units[unitName].pyqStructured) {
+    bucket.subjects[subjectName].units[unitName].pyqStructured = {
+      mcq: [],
+      short: [],
+      long: []
+    };
+  }
+  if (!Array.isArray(bucket.subjects[subjectName].units[unitName].mockMcqSet)) {
+    bucket.subjects[subjectName].units[unitName].mockMcqSet = [];
   }
   return bucket.subjects[subjectName].units[unitName];
 }
 
-function detectLanguage(text) {
-  if (/[\u0900-\u097F]/.test(text)) {
-    return "hindi";
-  }
-  const lower = text.toLowerCase();
-  const hinglishWords = [
-    "kya", "hai", "hain", "kaise", "kese", "kaun", "kon", "aur", "me", "mein",
-    "se", "ko", "ki", "ke", "ka", "likhna", "samjha", "batao", "bataiye",
-    "dhoondh", "dhundh", "wala", "wali", "wale", "karna", "karein", "chahiye",
-    "hota", "hoti", "hote", "ban", "sakte", "gaye", "hue", "hui", "puchha"
-  ];
-  const tokens = lower.split(/[^a-z0-9]+/).filter(Boolean);
-  const matchCount = tokens.filter((w) => hinglishWords.includes(w)).length;
-  if (matchCount >= 1) {
-    return "hinglish";
-  }
-  return "english";
-}
-
 function escapeMarkdownText(str) {
   return String(str || "").replace(/([_*`\[])/g, "\\$1");
+}
+
+function escapeHtml(str) {
+  return String(str || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
 }
 
 function isLikelyHeading(line) {
@@ -388,7 +341,8 @@ function cleanPdfLine(rawLine) {
   return s;
 }
 
-function buildHandwrittenMessages(rawText, title, lang) {
+// Notebook / Lined-Page Style Handwritten Notes
+function buildHandwrittenMessages(rawText, title) {
   const rawLines = (rawText || "").split(/\r?\n/);
   const cleanedLines = rawLines.map(cleanPdfLine).filter(Boolean);
 
@@ -401,50 +355,38 @@ function buildHandwrittenMessages(rawText, title, lang) {
     : `*${escapeMarkdownText(unitPart)}*`;
 
   if (cleanedLines.length === 0) {
-    const emptyMsg =
-      lang === "hindi"
-        ? `📌 ${unitLabel}\n\n✍️ *हस्तलिखित नोट्स:*\n  • अभी इस इकाई के नोट्स उपलब्ध नहीं हैं।`
-        : lang === "english"
-          ? `📌 ${unitLabel}\n\n✍️ *Handwritten Notes:*\n  • Notes for this unit are currently being updated.`
-          : `📌 ${unitLabel}\n\n✍️ *Hand Written Notes:*\n  • Is unit ke notes abhi update kiye ja rahe hain.`;
-    return [emptyMsg];
+    return [
+      `📓 *NOTEBOOK PAGE — ${unitLabel}*\n━━━━━━━━━━━━━━━━━━━━━━\n✍️ • Is unit ke notes abhi available nahi hain.`
+    ];
   }
 
-  const formattedBodyLines = [];
+  const notebookLines = [];
   for (const line of cleanedLines) {
     const safeLine = escapeMarkdownText(line);
     if (isLikelyHeading(line)) {
       const cleanHeading = safeLine.replace(/:$/, "");
-      formattedBodyLines.push(`\n*📌 ${cleanHeading}*`);
+      notebookLines.push(`\n──────────────────────\n*📌 ${cleanHeading}*`);
+      notebookLines.push(`──────────────────────`);
     } else if (isSubPoint(line)) {
       const strippedPoint = safeLine
         .replace(/^(\d+[\).\s-]|[a-dA-D]\)\s*|[-–•●▪◦]\s*)+/, "")
         .trim();
-      formattedBodyLines.push(`  ✍️ • ${strippedPoint || safeLine}`);
+      notebookLines.push(`✍️ • ${strippedPoint || safeLine}`);
+      notebookLines.push(`┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄`);
     } else {
-      formattedBodyLines.push(`  ✍️ ${safeLine}`);
+      notebookLines.push(`✍️ ${safeLine}`);
+      notebookLines.push(`┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄`);
     }
   }
 
-  const header =
-    lang === "hindi"
-      ? `📚 ${unitLabel}\n──────────────────────\n✍️ *हस्तलिखित नोट्स (PDF अनुसार)*\n`
-      : lang === "english"
-        ? `📚 ${unitLabel}\n──────────────────────\n✍️ *Handwritten Notes (As per PDF)*\n`
-        : `📚 ${unitLabel}\n──────────────────────\n✍️ *Hand Written Notes (PDF Ke Hisaab Se)*\n`;
-
-  const footer =
-    lang === "hindi"
-      ? `\n──────────────────────\n📝 *परीक्षा टिप:* मुख्य हेडिंग, परिभाषा और बिंदु साफ-सुथरे ढंग से लिखें।`
-      : lang === "english"
-        ? `\n──────────────────────\n📝 *Exam Tip:* Write clear headings, definitions, and structured points.`
-        : `\n──────────────────────\n📝 *Exam Tip:* Main headings, definitions, aur points saaf tarike se likhein.`;
+  const header = `📓 *HAND WRITTEN NOTEBOOK — ${unitLabel}*\n━━━━━━━━━━━━━━━━━━━━━━\n`;
+  const footer = `\n━━━━━━━━━━━━━━━━━━━━━━\n📝 *Exam Tip:* Heading aur points ko saaf line-by-line likhein.`;
 
   const maxChunkLen = 3350;
   const chunks = [];
   let current = header;
 
-  for (const entry of formattedBodyLines) {
+  for (const entry of notebookLines) {
     const block = `${entry}\n`;
     if ((current + block).length > maxChunkLen) {
       chunks.push(`${current.trimEnd()}${footer}`);
@@ -461,197 +403,162 @@ function buildHandwrittenMessages(rawText, title, lang) {
   return chunks;
 }
 
-function buildHandwrittenPreview(rawText, title, lang) {
-  const msgs = buildHandwrittenMessages(rawText, title, lang);
-  return msgs[0];
-}
-function searchAdminPdfsForQuery(query) {
-  const qLower = (query || "").toLowerCase();
-  const keywords = qLower
-    .split(/[^a-z0-9\u0900-\u097F]+/i)
-    .filter((w) => w.length >= 2);
+// Auto-generate PYQ (MCQ, Short, Long with Answers) + 20-Question Mock MCQ Set from PDF text
+function generateStudyMaterialsFromPdfText(rawText, subjectName, unitName) {
+  const cleanedLines = (rawText || "")
+    .split(/\r?\n/)
+    .map(cleanPdfLine)
+    .filter((l) => l.length >= 12);
 
-  const matches = [];
-  for (const pdf of studyDb.uploadedPdfs || []) {
-    const text = pdf.extractedText || "";
-    const textLower = text.toLowerCase();
-    const metaStr = `${pdf.category || ""} ${pdf.course || ""} ${pdf.periodKey || ""} ${pdf.subjectName || ""} ${pdf.unitName || ""} ${pdf.title || ""}`.toLowerCase();
+  const sentences = (rawText || "")
+    .replace(/\s+/g, " ")
+    .split(/(?<=[.!?])\s+/)
+    .map((s) => s.replace(/[\u2022\u25CF\u25AA\u25AB\u25E6\uF0B7]/g, "").trim())
+    .filter((s) => s.length >= 25 && s.length <= 260);
 
-    let score = 0;
-    if (qLower.length >= 3 && textLower.includes(qLower)) score += 10;
-    if (qLower.length >= 3 && metaStr.includes(qLower)) score += 8;
+  const headings = cleanedLines
+    .filter((l) => isLikelyHeading(l))
+    .map((l) => l.replace(/:$/, "").trim());
 
-    const matchedLines = [];
-    const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const factPool = sentences.length > 0 ? sentences : cleanedLines;
+  const topicPool = headings.length > 0 ? headings : [unitName, subjectName];
 
-    for (const kw of keywords) {
-      if (textLower.includes(kw)) score += 2;
-      if (metaStr.includes(kw)) score += 2;
-    }
+  const pyqMcq = [];
+  const pyqShort = [];
+  const pyqLong = [];
+  const mockMcqSet = [];
 
-    for (const line of lines) {
-      const lLower = line.toLowerCase();
-      if (keywords.some((kw) => lLower.includes(kw))) {
-        matchedLines.push(line);
-      }
-      if (matchedLines.length >= 10) break;
-    }
+  const distractors = [
+    "It is unrelated to pharmaceutical or natural product study.",
+    "It applies only to synthetic polymers without biological origin.",
+    "It is a non-therapeutic laboratory solvent only."
+  ];
 
-    if (score > 0 || matchedLines.length > 0) {
-      matches.push({
-        pdf,
-        score,
-        excerpt: matchedLines.join("\n") || lines.slice(0, 8).join("\n")
-      });
+  // Build up to 25 PYQ MCQs & 20 Mock MCQs
+  const totalMcqTarget = Math.min(25, Math.max(5, factPool.length));
+  for (let i = 0; i < totalMcqTarget; i++) {
+    const fact = factPool[i % factPool.length];
+    const headingHint = topicPool[i % topicPool.length];
+    const qStem = `Which statement correctly describes "${headingHint}" in ${unitName}?`;
+    const correctAns = fact.length > 110 ? `${fact.slice(0, 107)}...` : fact;
+
+    const item = {
+      question: qStem,
+      options: {
+        A: correctAns,
+        B: distractors[0],
+        C: distractors[1],
+        D: distractors[2]
+      },
+      correctOption: "A",
+      answer: `Option A — ${correctAns}`
+    };
+
+    pyqMcq.push(item);
+    if (mockMcqSet.length < 20) {
+      mockMcqSet.push(item);
     }
   }
 
-  matches.sort((a, b) => b.score - a.score);
-  return matches;
-}
+  // Ensure Mock MCQ Set has 20 questions even if PDF text was short
+  let padIdx = 1;
+  while (mockMcqSet.length < 20) {
+    const tName = topicPool[(mockMcqSet.length) % topicPool.length];
+    const baseFact = factPool[mockMcqSet.length % Math.max(1, factPool.length)] || `${tName} is an important concept in ${subjectName}.`;
+    const shortFact = baseFact.length > 105 ? `${baseFact.slice(0, 102)}...` : baseFact;
+    mockMcqSet.push({
+      question: `Mock Q${padIdx}: Identify the correct point regarding "${tName}" (${unitName}).`,
+      options: {
+        A: shortFact,
+        B: "Used exclusively as an industrial fuel.",
+        C: "Has no relevance to biological or medicinal study.",
+        D: "Is a synthetic petroleum byproduct."
+      },
+      correctOption: "A",
+      answer: `Option A — ${shortFact}`
+    });
+    padIdx++;
+  }
 
-function collectStoredQuestionsForQuery(query) {
-  const qLower = (query || "").toLowerCase();
-  const keywords = qLower
-    .split(/[^a-z0-9\u0900-\u097F]+/i)
-    .filter((w) => w.length >= 2);
+  // Build PYQ Short Questions + Answers
+  const shortCount = Math.min(15, Math.max(5, factPool.length));
+  for (let i = 0; i < shortCount; i++) {
+    const fact = factPool[i % factPool.length];
+    const h = topicPool[i % topicPool.length];
+    pyqShort.push({
+      question: `Explain briefly: Key concept of "${h}" in ${unitName}.`,
+      answer: fact
+    });
+  }
 
-  const pyqs = [];
-  const mocks = [];
+  // Build PYQ Long Questions + Answers
+  const longCount = Math.min(10, Math.max(5, topicPool.length + 2));
+  for (let i = 0; i < longCount; i++) {
+    const h = topicPool[i % topicPool.length];
+    const relatedFacts = factPool.slice(i * 2, i * 2 + 3);
+    const ansText =
+      relatedFacts.length > 0
+        ? relatedFacts.join(" ")
+        : `${h} is covered in ${unitName} under ${subjectName}. Write definition, classification/key points, and examples.`;
 
-  const traverse = (obj) => {
-    if (!obj || typeof obj !== "object") return;
-    if (Array.isArray(obj.pyqQuestions)) {
-      for (const item of obj.pyqQuestions) {
-        const s = String(item);
-        if (!keywords.length || keywords.some((k) => s.toLowerCase().includes(k)) || s.toLowerCase().includes(qLower)) {
-          pyqs.push(s);
-        }
-      }
-    }
-    if (Array.isArray(obj.mockQuestions)) {
-      for (const item of obj.mockQuestions) {
-        const s = String(item);
-        if (!keywords.length || keywords.some((k) => s.toLowerCase().includes(k)) || s.toLowerCase().includes(qLower)) {
-          mocks.push(s);
-        }
-      }
-    }
-    for (const val of Object.values(obj)) {
-      if (val && typeof val === "object") traverse(val);
-    }
+    pyqLong.push({
+      question: `Discuss in detail "${h}" with key points, examples, and relevance in ${subjectName}.`,
+      answer: ansText
+    });
+  }
+
+  return {
+    pyqStructured: {
+      mcq: pyqMcq,
+      short: pyqShort,
+      long: pyqLong
+    },
+    mockMcqSet
   };
-
-  traverse(studyDb.materials);
-  return { pyqs, mocks };
+}
+function detectLanguage(text) {
+  if (/[\u0900-\u097F]/.test(text)) return "hindi";
+  const lower = text.toLowerCase();
+  const hinglishWords = [
+    "kya", "hai", "hain", "kaise", "kese", "kaun", "kon", "aur", "me", "mein",
+    "se", "ko", "ki", "ke", "ka", "likhna", "samjha", "batao", "bataiye",
+    "dhoondh", "dhundh", "wala", "wali", "wale", "karna", "karein", "chahiye"
+  ];
+  const tokens = lower.split(/[^a-z0-9]+/).filter(Boolean);
+  if (tokens.filter((w) => hinglishWords.includes(w)).length >= 1) return "hinglish";
+  return "english";
 }
 
 function buildSmartAiAssistantResponse(query) {
   const lang = detectLanguage(query);
-  const matches = searchAdminPdfsForQuery(query);
-  const { pyqs, mocks } = collectStoredQuestionsForQuery(query);
-  const bestMatch = matches[0] || null;
+  const qLower = (query || "").toLowerCase();
+  const keywords = qLower.split(/[^a-z0-9\u0900-\u097F]+/i).filter((w) => w.length >= 2);
 
-  const sourceLabel = bestMatch
-    ? `${bestMatch.pdf.title} (${bestMatch.pdf.subjectName || bestMatch.pdf.course || "Admin PDF"})`
-    : (studyDb.uploadedPdfs.length > 0 ? "Admin Uploaded PDFs" : "General Study Knowledge");
+  let bestExcerpt = "";
+  let sourceLabel = "General Study Knowledge";
 
-  const handwrittenSnippet = bestMatch
-    ? buildHandwrittenPreview(bestMatch.excerpt, `${query} — ${sourceLabel}`, lang)
-    : buildHandwrittenPreview(
-        `Topic "${query}" ke main concepts ko points mein samjhein.\nKey definitions, classification/steps, aur examples par focus karein.`,
-        query,
-        lang
-      );
+  for (const pdf of studyDb.uploadedPdfs || []) {
+    const text = pdf.extractedText || "";
+    const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    const matched = lines.filter((l) => keywords.some((k) => l.toLowerCase().includes(k))).slice(0, 6);
+    if (matched.length > 0) {
+      bestExcerpt = matched.join("\n");
+      sourceLabel = `${pdf.title} (${pdf.subjectName || "Admin PDF"})`;
+      break;
+    }
+  }
 
-  const pyqSectionText = pyqs.length > 0
-    ? pyqs.slice(0, 6).map((q, i) => `  • PYQ ${i + 1}: ${q}`).join("\n")
-    : (lang === "hindi"
-        ? "  • अभी इस विषय के लिए सहेजे गए PYQ प्रश्न नहीं मिले।"
-        : lang === "english"
-          ? "  • No saved PYQ questions found for this exact topic yet."
-          : "  • Is topic ke liye abhi saved PYQ questions nahi mile.");
-
-  const mockSectionText = mocks.length > 0
-    ? mocks.slice(0, 5).map((q, i) => `  • Mock ${i + 1}: ${q}`).join("\n")
-    : (lang === "hindi"
-        ? `  • संभावित प्रश्न: "${query}" की परिभाषा, मुख्य प्रकार/विशेषताएँ और उपयोग लिखिए।`
-        : lang === "english"
-          ? `  • Practice Question: Define "${query}", explain its key types/features, and give examples.`
-          : `  • Practice Question: "${query}" ki definition, main types/features, aur examples likhein.`);
+  const notePreview = bestExcerpt
+    ? buildHandwrittenMessages(bestExcerpt, query)[0]
+    : `📓 *Topic:* *${escapeMarkdownText(query)}*\n✍️ • Key definitions, main points, aur examples ke saath answer likhein.`;
 
   if (lang === "hindi") {
-    return (
-`🤖 *AI सहायक — हस्तलिखित शैली उत्तर*
-🔎 *खोजा गया विषय:* *${query}*
-📂 *स्रोत (PDFs में से):* ${sourceLabel} (कुल PDFs: ${studyDb.uploadedPdfs.length})
-
-${handwrittenSnippet}
-
-❓ *इस विषय से किस-किस प्रकार के प्रश्न बन सकते हैं:*
-  • *Short Answer (2–3 अंक):* परिभाषा, महत्व या संक्षिप्त अंतर।
-  • *Long / Descriptive Answer (5–10 अंक):* पूरा विवरण, वर्गीकरण, कार्यप्रणाली या चरण।
-  • *Application / Case / MCQ:* व्यावहारिक उपयोग, उदाहरण और सही विकल्प चुनने वाले प्रश्न।
-
-📌 *पहले से बने हुए प्रश्न (PYQ / Mock):*
-${pyqSectionText}
-${mockSectionText}
-
-✍️ *उत्तर कैसे लिखना चाहिए:*
-  1. *परिभाषा / परिचय:* 2–3 स्पष्ट पंक्तियों में शुरुआत करें।
-  2. *मुख्य बिंदु / वर्गीकरण:* बुलेट या हेडिंग के साथ व्यवस्थित बिंदु लिखें।
-  3. *उदाहरण / रेखाचित्र:* जहाँ संभव हो वहाँ उदाहरण या सरल डायग्राम बनाएँ।
-  4. *निष्कर्ष:* अंत में 1–2 पंक्तियों में सारांश लिखें।`
-    );
+    return `🤖 *AI सहायक*\n🔎 *विषय:* *${escapeMarkdownText(query)}*\n📂 *स्रोत:* ${escapeMarkdownText(sourceLabel)}\n\n${notePreview}`;
   }
-
   if (lang === "english") {
-    return (
-`🤖 *AI Assistant — Handwritten Study Response*
-🔎 *Topic Queried:* *${query}*
-📂 *Source (From Admin PDFs):* ${sourceLabel} (Total PDFs: ${studyDb.uploadedPdfs.length})
-
-${handwrittenSnippet}
-
-❓ *Types of Questions That Can Be Asked:*
-  • *Short Answer (2–3 Marks):* Definitions, core terms, or concise differences.
-  • *Long / Structured Answer (5–10 Marks):* Detailed explanation, classification, mechanisms, or steps.
-  • *MCQs & Case/Application Questions:* Concept checks, real-world scenarios, and exceptions.
-
-📌 *Questions Already Available (PYQ / Mock):*
-${pyqSectionText}
-${mockSectionText}
-
-✍️ *How to Write the Answer in Exams:*
-  1. *Definition / Intro:* Start with a clear, concise definition.
-  2. *Structured Points / Classification:* Use headings or bullet points with key terms.
-  3. *Examples / Diagrams:* Add examples or a simple flow/diagram where helpful.
-  4. *Summary:* Conclude with a brief wrap-up line.`
-    );
+    return `🤖 *AI Assistant*\n🔎 *Topic:* *${escapeMarkdownText(query)}*\n📂 *Source:* ${escapeMarkdownText(sourceLabel)}\n\n${notePreview}`;
   }
-
-  return (
-`🤖 *AI Assistant — Hand Written Style Explanation*
-🔎 *Topic:* *${query}*
-📂 *PDF Search Source:* ${sourceLabel} (Total Admin PDFs: ${studyDb.uploadedPdfs.length})
-
-${handwrittenSnippet}
-
-❓ *Kis-Kis Type Ke Questions Ban Sakte Hain:*
-  • *Short Questions (2–3 Marks):* Definition, key points, ya short difference.
-  • *Long Questions (5–10 Marks):* Complete explanation, classification, process/mechanism, ya examples.
-  • *MCQ & Application Questions:* Concept-based MCQs ya practical/case scenarios.
-
-📌 *Kaun-Kaun Se Questions Ban Chuke Hain (PYQ / Mock):*
-${pyqSectionText}
-${mockSectionText}
-
-✍️ *Answer Kaise Likhna Hai:*
-  1. *Introduction / Definition:* Pehle 2–3 line mein clear definition likhein.
-  2. *Main Points / Classification:* Headings aur bullet points mein neat points likhein.
-  3. *Examples / Flow Diagram:* Jahan zaroorat ho wahan example ya simple diagram banayein.
-  4. *Conclusion:* Last mein 1–2 line mein short summary likhein.`
-  );
+  return `🤖 *AI Assistant*\n🔎 *Topic:* *${escapeMarkdownText(query)}*\n📂 *Source:* ${escapeMarkdownText(sourceLabel)}\n\n${notePreview}`;
 }
 
 function getMainMenuMarkup(user) {
@@ -660,17 +567,15 @@ function getMainMenuMarkup(user) {
   const welcomeText =
 `🌸 - <b>STUDY MATERIAL BOT</b> - 🌸
 
-👤 Hello, <code>${user.name}</code> !
+👤 Hello, <code>${escapeHtml(user.name)}</code> !
 
 📚 <b>Your Complete Study Assistant</b>
 
-➖ 📖 <b>Syllabus</b> (Subject > Units & Topics Text)
-➖ ✍️ <b>Hand Written Notes</b> (Full Notebook Style Text)
-➖ 📝 <b>PYQ Question</b> (Chapter Wise Past Questions)
-➖ 🧠 <b>MCQ Question</b>
-➖ 🎯 <b>Mock Test</b> (Chapter Wise Practice Questions)
-➖ 🤖 <b>AI Assistant</b> (PDF Search + Hinglish/English/Hindi)
-➖ 🔄 <b>Revision Notes</b>
+➖ 📖 <b>Syllabus</b> (Subject > Units & Topics)
+➖ ✍️ <b>Hand Written Notes</b> (Notebook Style Text)
+➖ 📝 <b>PYQ Question</b> (MCQ / Short / Long — 5-5 Set + Answers)
+➖ 🎯 <b>Mock Test</b> (20 Questions Interactive Set)
+➖ 🤖 <b>AI Assistant</b> (PDF Search)
 ➖ 🪪 <b>Admit Cards Link & 📊 Result Link</b>
 
 ──────────────────────
@@ -697,6 +602,141 @@ function getMainMenuMarkup(user) {
   return { resText: welcomeText, reply_markup: { inline_keyboard } };
 }
 
+function renderMockQuestionMessage(session) {
+  const qIndex = session.currentIndex;
+  const total = session.questions.length;
+  const item = session.questions[qIndex];
+
+  const text =
+`🎯 <b>MOCK TEST — ${escapeHtml(session.unitName)}</b>
+📘 <b>Subject:</b> ${escapeHtml(session.subjectName)}
+📊 <b>Question ${qIndex + 1} / ${total}</b>
+✅ Correct: ${session.correctCount} | ❌ Wrong: ${session.wrongCount} | ⏭️ Skipped: ${session.skippedCount}
+
+<b>Q${qIndex + 1}. ${escapeHtml(item.question)}</b>
+
+<b>A)</b> ${escapeHtml(item.options.A)}
+<b>B)</b> ${escapeHtml(item.options.B)}
+<b>C)</b> ${escapeHtml(item.options.C)}
+<b>D)</b> ${escapeHtml(item.options.D)}
+<b>E)</b> <i>Chhodne ka (Skip)</i>`;
+
+  const inline_keyboard = [
+    [
+      { text: "A", callback_data: `mockans_${qIndex}_A` },
+      { text: "B", callback_data: `mockans_${qIndex}_B` },
+      { text: "C", callback_data: `mockans_${qIndex}_C` },
+      { text: "D", callback_data: `mockans_${qIndex}_D` }
+    ],
+    [
+      { text: "E — Chhodne Ka (Skip)", callback_data: `mockans_${qIndex}_E` }
+    ],
+    [
+      { text: "🔙 Main Menu", callback_data: "main_menu" }
+    ]
+  ];
+
+  return { text, reply_markup: { inline_keyboard } };
+}
+
+function renderMockSummaryMessage(session) {
+  const total = session.questions.length;
+  const text =
+`🏁 <b>MOCK TEST COMPLETED!</b>
+
+📘 <b>Subject:</b> ${escapeHtml(session.subjectName)}
+📂 <b>Unit:</b> ${escapeHtml(session.unitName)}
+──────────────────────
+📝 <b>Total Questions:</b> ${total}
+✅ <b>Sahi (Correct):</b> ${session.correctCount}
+❌ <b>Galat (Wrong):</b> ${session.wrongCount}
+⏭️ <b>Chhode Gaye (Skipped):</b> ${session.skippedCount}
+──────────────────────`;
+
+  return {
+    text,
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: "🔄 Restart 20-Q Mock Test", callback_data: `sunit_${session.navSuffix}` }],
+        [{ text: "🔙 Main Menu", callback_data: "main_menu" }]
+      ]
+    }
+  };
+}
+
+function renderPyqSetMessage(pyqRec, pyqType, setIdx, subjectName, unitName, navSuffix) {
+  const list = (pyqRec && pyqRec.pyqStructured && pyqRec.pyqStructured[pyqType]) || [];
+  const totalAvailable = list.length;
+  const pageSize = 5;
+  const totalSets = Math.max(1, Math.ceil(totalAvailable / pageSize));
+  const safeSetIdx = Math.max(0, Math.min(setIdx, totalSets - 1));
+  const start = safeSetIdx * pageSize;
+  const slice = list.slice(start, start + pageSize);
+
+  const typeLabel =
+    pyqType === "mcq"
+      ? "MCQ QUESTIONS"
+      : pyqType === "short"
+        ? "SHORT QUESTIONS"
+        : "LONG QUESTIONS";
+
+  let body = "";
+  if (slice.length === 0) {
+    body = "Is unit ke liye abhi questions generate nahi hue hain. Admin ek baar PDF upload kare.";
+  } else {
+    body = slice
+      .map((item, idx) => {
+        const qNum = start + idx + 1;
+        if (pyqType === "mcq") {
+          const opts = item.options || {};
+          return (
+`<b>Q${qNum}. ${escapeHtml(item.question)}</b>
+A) ${escapeHtml(opts.A || "")}
+B) ${escapeHtml(opts.B || "")}
+C) ${escapeHtml(opts.C || "")}
+D) ${escapeHtml(opts.D || "")}
+
+<b>✅ Answer:</b> ${escapeHtml(item.answer || "")}`
+          );
+        }
+        return (
+`<b>Q${qNum}. ${escapeHtml(item.question)}</b>
+
+<b>✅ Answer:</b> ${escapeHtml(item.answer || "")}`
+        );
+      })
+      .join("\n\n\n");
+  }
+
+  const navRow = [];
+  if (safeSetIdx > 0) {
+    navRow.push({
+      text: `⬅️ Set ${safeSetIdx}`,
+      callback_data: `pyqset_${pyqType}_${safeSetIdx - 1}_${navSuffix}`
+    });
+  }
+  if (safeSetIdx + 1 < totalSets) {
+    navRow.push({
+      text: `Next Set ${safeSetIdx + 2} ➡️`,
+      callback_data: `pyqset_${pyqType}_${safeSetIdx + 1}_${navSuffix}`
+    });
+  }
+
+  const keyboard = [];
+  if (navRow.length > 0) keyboard.push(navRow);
+  keyboard.push([{ text: "🔙 Back to PYQ Type", callback_data: `sunit_${navSuffix}` }]);
+  keyboard.push([{ text: "🔙 Main Menu", callback_data: "main_menu" }]);
+
+  const text =
+`📝 <b>PYQ ${typeLabel} — ${escapeHtml(unitName)}</b>
+📘 <b>Subject:</b> ${escapeHtml(subjectName)}
+📊 <b>Total PYQs Found:</b> ${totalAvailable} | <b>Set ${safeSetIdx + 1} / ${totalSets}</b> (5 Questions/Set)
+
+
+${body}`;
+
+  return { text, reply_markup: { inline_keyboard: keyboard } };
+}
 app.get('/', (req, res) => {
   res.status(200).send('STUDY MATERIAL BOT server is running.');
 });
@@ -712,11 +752,12 @@ app.post('/webhook', async (req, res) => {
       const text = (update.message.text || "").trim();
       const user = getUser(from.id, from.first_name);
 
+      // Single PDF upload by Admin -> generates Hand Written Notes, PYQ (MCQ/Short/Long) & Mock Test
       if (update.message.document) {
         if (!isAdmin(from.id)) {
           await axios.post(`${TELEGRAM_API}/sendMessage`, {
             chat_id: chatId,
-            text: "🚫 <b>Permission Denied:</b> Sirf Admin hi PDF ya study material add kar sakta hai.",
+            text: "🚫 <b>Permission Denied:</b> Sirf Admin hi PDF upload kar sakta hai.",
             parse_mode: "HTML"
           });
           return;
@@ -730,15 +771,23 @@ app.post('/webhook', async (req, res) => {
         if (!isPdf) {
           await axios.post(`${TELEGRAM_API}/sendMessage`, {
             chat_id: chatId,
-            text: "⚠️ Kripya sirf <b>PDF</b> file hi bhejein.",
+            text: "⚠️ Kripya sirf <b>PDF</b> file bhejein.",
             parse_mode: "HTML"
           });
           return;
         }
 
-        const flow = user.adminUploadFlow || {};
-        let extractedText = "";
+        const flow = user.adminUploadFlow;
+        if (!flow || !flow.category || !flow.course || !flow.periodKey || !flow.subjectName || !flow.unitName) {
+          await axios.post(`${TELEGRAM_API}/sendMessage`, {
+            chat_id: chatId,
+            text: "⚠️ Pehle <code>/add_pdf Category | Course | Year (or -) | Semester | Subject | Unit | Title</code> command bhejein, phir PDF file attach karein.",
+            parse_mode: "HTML"
+          });
+          return;
+        }
 
+        let extractedText = "";
         if (pdfParse) {
           try {
             const fileInfoRes = await axios.get(`${TELEGRAM_API}/getFile`, {
@@ -757,14 +806,14 @@ app.post('/webhook', async (req, res) => {
         }
 
         const pdfRecord = {
-          title: flow.title || doc.file_name || "Uploaded PDF",
+          title: flow.title || doc.file_name || "Unit PDF",
           fileName: doc.file_name || "document.pdf",
           fileId: doc.file_id,
-          category: flow.category || "Pharmacy",
-          course: flow.course || "B.Pharma",
-          periodKey: flow.periodKey || "1st Year > Semester 1",
-          subjectName: flow.subjectName || "",
-          unitName: flow.unitName || "",
+          category: flow.category,
+          course: flow.course,
+          periodKey: flow.periodKey,
+          subjectName: flow.subjectName,
+          unitName: flow.unitName,
           extractedText,
           addedBy: from.id,
           addedAt: new Date().toISOString()
@@ -772,36 +821,71 @@ app.post('/webhook', async (req, res) => {
 
         studyDb.uploadedPdfs.push(pdfRecord);
 
-        if (flow.category && flow.course && flow.periodKey && flow.subjectName && flow.unitName) {
-          const unitRec = ensureUnitRecord(
-            flow.category,
-            flow.course,
-            flow.periodKey,
-            "Hand Written Notes",
-            flow.subjectName,
-            flow.unitName,
-            true
-          );
-          if (extractedText) {
-            unitRec.handwrittenNotes = unitRec.handwrittenNotes
-              ? `${unitRec.handwrittenNotes}\n${extractedText}`
-              : extractedText;
-          }
-        }
+        const generated = generateStudyMaterialsFromPdfText(
+          extractedText,
+          flow.subjectName,
+          flow.unitName
+        );
+
+        // 1) Hand Written Notes
+        const notesUnit = ensureUnitRecord(
+          flow.category,
+          flow.course,
+          flow.periodKey,
+          "Hand Written Notes",
+          flow.subjectName,
+          flow.unitName,
+          true
+        );
+        notesUnit.handwrittenNotes = extractedText;
+
+        // 2) PYQ Question (MCQ, Short, Long + Answers)
+        const pyqUnit = ensureUnitRecord(
+          flow.category,
+          flow.course,
+          flow.periodKey,
+          "PYQ Question",
+          flow.subjectName,
+          flow.unitName,
+          true
+        );
+        pyqUnit.pyqStructured = generated.pyqStructured;
+        pyqUnit.pyqQuestions = [
+          ...generated.pyqStructured.mcq.map((q) => `${q.question} — ${q.answer}`),
+          ...generated.pyqStructured.short.map((q) => `${q.question} — ${q.answer}`),
+          ...generated.pyqStructured.long.map((q) => `${q.question} — ${q.answer}`)
+        ];
+
+        // 3) Mock Test (20 MCQ Set)
+        const mockUnit = ensureUnitRecord(
+          flow.category,
+          flow.course,
+          flow.periodKey,
+          "Mock Test",
+          flow.subjectName,
+          flow.unitName,
+          true
+        );
+        mockUnit.mockMcqSet = generated.mockMcqSet;
+        mockUnit.mockQuestions = generated.mockMcqSet.map((q) => q.question);
 
         user.adminUploadFlow = null;
-        saveData();
+        persistAll();
 
         await axios.post(`${TELEGRAM_API}/sendMessage`, {
           chat_id: chatId,
           text:
-`✅ <b>PDF Indexed for Handwritten Notes & AI Assistant!</b>
+`✅ <b>Single PDF Processed & Generated All Sections!</b>
 
-📄 <b>Title:</b> <code>${pdfRecord.title}</code>
-📝 <b>Extracted Text Length:</b> ${extractedText.length} characters
-📚 <b>Total Indexed PDFs:</b> ${studyDb.uploadedPdfs.length}
+📄 <b>Title:</b> <code>${escapeHtml(pdfRecord.title)}</code>
+📘 <b>Subject:</b> ${escapeHtml(flow.subjectName)}
+📂 <b>Unit:</b> ${escapeHtml(flow.unitName)}
+📝 <b>Extracted Text:</b> ${extractedText.length} chars
 
-<i>Ab Hand Written Notes mein poori PDF ka handwritten-style text aayega aur AI Assistant isi PDF text mein se search karega.</i>`,
+<b>Generated Automatically:</b>
+✍️ Hand Written Notes: Ready
+📝 PYQ Questions: ${generated.pyqStructured.mcq.length} MCQ | ${generated.pyqStructured.short.length} Short | ${generated.pyqStructured.long.length} Long
+🎯 Mock Test: ${generated.mockMcqSet.length} Questions Set Ready`,
           parse_mode: "HTML"
         });
         return;
@@ -814,23 +898,14 @@ app.post('/webhook', async (req, res) => {
         user.selectedYear = null;
         user.selectedSemester = null;
         user.adminUploadFlow = null;
-        saveData();
+        user.activeMockSession = null;
+        persistAll();
 
         const menu = getMainMenuMarkup(user);
         await axios.post(`${TELEGRAM_API}/sendMessage`, {
           chat_id: chatId,
           text: menu.resText,
           parse_mode: "HTML",
-          reply_markup: menu.reply_markup
-        });
-      }
-      else if (text.startsWith('/cancel')) {
-        user.adminUploadFlow = null;
-        saveData();
-        const menu = getMainMenuMarkup(user);
-        await axios.post(`${TELEGRAM_API}/sendMessage`, {
-          chat_id: chatId,
-          text: "❌ Action cancelled.",
           reply_markup: menu.reply_markup
         });
       }
@@ -854,89 +929,11 @@ app.post('/webhook', async (req, res) => {
         for (const tp of newTopics) {
           if (!unitRec.topics.includes(tp)) unitRec.topics.push(tp);
         }
-        saveData();
+        persistAll();
 
         await axios.post(`${TELEGRAM_API}/sendMessage`, {
           chat_id: chatId,
-          text: `✅ <b>Syllabus Topics Added!</b>\n${course} > ${periodKey} > <b>${subjectName}</b>\nUnit: <b>${unitName}</b>\nTopics: ${unitRec.topics.join(", ")}`,
-          parse_mode: "HTML"
-        });
-      }
-      else if (text.startsWith('/set_notes')) {
-        if (!isAdmin(from.id)) return;
-        const parts = text.replace('/set_notes', '').trim().split('|').map((s) => s.trim());
-        if (parts.length < 7) {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, {
-            chat_id: chatId,
-            text: "⚠️ Use: <code>/set_notes Category | Course | Year (or -) | Semester | Subject | Unit | Notes Text</code>",
-            parse_mode: "HTML"
-          });
-          return;
-        }
-        const [category, course, yearRaw, semester, subjectName, unitName, ...notesParts] = parts;
-        const yearName = (!yearRaw || yearRaw === "-" || yearRaw.toLowerCase() === "none") ? null : yearRaw;
-        const periodKey = buildPeriodStorageKey(yearName, semester);
-        const notesText = notesParts.join(" | ");
-
-        const unitRec = ensureUnitRecord(category, course, periodKey, "Hand Written Notes", subjectName, unitName, true);
-        unitRec.handwrittenNotes = notesText;
-        saveData();
-
-        await axios.post(`${TELEGRAM_API}/sendMessage`, {
-          chat_id: chatId,
-          text: `✅ <b>Hand Written Notes Saved!</b>\n${course} > ${periodKey} > <b>${subjectName}</b> > <b>${unitName}</b>`,
-          parse_mode: "HTML"
-        });
-      }
-      else if (text.startsWith('/add_pyq')) {
-        if (!isAdmin(from.id)) return;
-        const parts = text.replace('/add_pyq', '').trim().split('|').map((s) => s.trim());
-        if (parts.length < 7) {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, {
-            chat_id: chatId,
-            text: "⚠️ Use: <code>/add_pyq Category | Course | Year (or -) | Semester | Subject | Unit | Q1; Q2</code>",
-            parse_mode: "HTML"
-          });
-          return;
-        }
-        const [category, course, yearRaw, semester, subjectName, unitName, ...qParts] = parts;
-        const yearName = (!yearRaw || yearRaw === "-" || yearRaw.toLowerCase() === "none") ? null : yearRaw;
-        const periodKey = buildPeriodStorageKey(yearName, semester);
-        const qList = qParts.join(" | ").split(';').map((q) => q.trim()).filter(Boolean);
-
-        const unitRec = ensureUnitRecord(category, course, periodKey, "PYQ Question", subjectName, unitName, true);
-        unitRec.pyqQuestions.push(...qList);
-        saveData();
-
-        await axios.post(`${TELEGRAM_API}/sendMessage`, {
-          chat_id: chatId,
-          text: `✅ <b>${qList.length} PYQ Question(s) Added!</b>\n${course} > ${periodKey} > <b>${subjectName}</b> > <b>${unitName}</b>`,
-          parse_mode: "HTML"
-        });
-      }
-      else if (text.startsWith('/add_mock')) {
-        if (!isAdmin(from.id)) return;
-        const parts = text.replace('/add_mock', '').trim().split('|').map((s) => s.trim());
-        if (parts.length < 7) {
-          await axios.post(`${TELEGRAM_API}/sendMessage`, {
-            chat_id: chatId,
-            text: "⚠️ Use: <code>/add_mock Category | Course | Year (or -) | Semester | Subject | Unit | Q1; Q2</code>",
-            parse_mode: "HTML"
-          });
-          return;
-        }
-        const [category, course, yearRaw, semester, subjectName, unitName, ...qParts] = parts;
-        const yearName = (!yearRaw || yearRaw === "-" || yearRaw.toLowerCase() === "none") ? null : yearRaw;
-        const periodKey = buildPeriodStorageKey(yearName, semester);
-        const qList = qParts.join(" | ").split(';').map((q) => q.trim()).filter(Boolean);
-
-        const unitRec = ensureUnitRecord(category, course, periodKey, "Mock Test", subjectName, unitName, true);
-        unitRec.mockQuestions.push(...qList);
-        saveData();
-
-        await axios.post(`${TELEGRAM_API}/sendMessage`, {
-          chat_id: chatId,
-          text: `✅ <b>${qList.length} Mock Question(s) Added!</b>\n${course} > ${periodKey} > <b>${subjectName}</b> > <b>${unitName}</b>`,
+          text: `✅ <b>Syllabus Topics Added!</b>\n${escapeHtml(course)} > ${escapeHtml(periodKey)} > <b>${escapeHtml(subjectName)}</b>\nUnit: <b>${escapeHtml(unitName)}</b>`,
           parse_mode: "HTML"
         });
       }
@@ -957,7 +954,7 @@ app.post('/webhook', async (req, res) => {
         const title = titleParts.join(" | ");
 
         user.adminUploadFlow = {
-          step: "WAITING_PDF",
+          step: "WAITING_SINGLE_PDF",
           category,
           course,
           periodKey,
@@ -965,14 +962,78 @@ app.post('/webhook', async (req, res) => {
           unitName,
           title
         };
-        saveData();
+        persistAll();
 
         await axios.post(`${TELEGRAM_API}/sendMessage`, {
           chat_id: chatId,
-          text: `📎 Ab <b>${title}</b> ke liye PDF bhejein. Bot uska text extract karke Hand Written Notes aur AI Assistant mein jodega.`,
+          text: `📎 Ek baar PDF bhejein (<b>${escapeHtml(title)}</b>). Isse Hand Written Notes, PYQ Questions aur Mock Test automatically ban jayenge.`,
           parse_mode: "HTML"
         });
       }
+      // Admin: Update Course Name
+      else if (text.startsWith('/update_course')) {
+        if (!isAdmin(from.id)) return;
+        const parts = text.replace('/update_course', '').trim().split('|').map((s) => s.trim());
+        if (parts.length < 3) {
+          await axios.post(`${TELEGRAM_API}/sendMessage`, {
+            chat_id: chatId,
+            text: "⚠️ Use: <code>/update_course Category | OldCourseName | NewCourseName</code>",
+            parse_mode: "HTML"
+          });
+          return;
+        }
+        const [category, oldCourse, newCourse] = parts;
+        if (CATEGORIES[category] && CATEGORIES[category].includes(oldCourse)) {
+          CATEGORIES[category] = CATEGORIES[category].map((c) => (c === oldCourse ? newCourse : c));
+        }
+        if (studyDb.materials[category] && studyDb.materials[category][oldCourse]) {
+          studyDb.materials[category][newCourse] = studyDb.materials[category][oldCourse];
+          delete studyDb.materials[category][oldCourse];
+        }
+        persistAll();
+
+        await axios.post(`${TELEGRAM_API}/sendMessage`, {
+          chat_id: chatId,
+          text: `✏️ <b>Course Updated:</b> <code>${escapeHtml(oldCourse)}</code> ➡️ <code>${escapeHtml(newCourse)}</code> (${escapeHtml(category)})`,
+          parse_mode: "HTML"
+        });
+      }
+      // Admin: Update Unit Name
+      else if (text.startsWith('/update_unit')) {
+        if (!isAdmin(from.id)) return;
+        const parts = text.replace('/update_unit', '').trim().split('|').map((s) => s.trim());
+        if (parts.length < 8) {
+          await axios.post(`${TELEGRAM_API}/sendMessage`, {
+            chat_id: chatId,
+            text: "⚠️ Use: <code>/update_unit Category | Course | Year (or -) | Semester | StudyType | Subject | OldUnitName | NewUnitName</code>",
+            parse_mode: "HTML"
+          });
+          return;
+        }
+        const [category, course, yearRaw, semester, studyType, subjectName, oldUnit, newUnit] = parts;
+        const yearName = (!yearRaw || yearRaw === "-" || yearRaw.toLowerCase() === "none") ? null : yearRaw;
+        const periodKey = buildPeriodStorageKey(yearName, semester);
+
+        const bucket = getSubjectBucket(category, course, periodKey, studyType, false);
+        if (bucket && bucket.subjects[subjectName] && bucket.subjects[subjectName].units && bucket.subjects[subjectName].units[oldUnit]) {
+          bucket.subjects[subjectName].units[newUnit] = bucket.subjects[subjectName].units[oldUnit];
+          delete bucket.subjects[subjectName].units[oldUnit];
+          persistAll();
+
+          await axios.post(`${TELEGRAM_API}/sendMessage`, {
+            chat_id: chatId,
+            text: `✏️ <b>Unit Updated:</b> <code>${escapeHtml(oldUnit)}</code> ➡️ <code>${escapeHtml(newUnit)}</code>`,
+            parse_mode: "HTML"
+          });
+        } else {
+          await axios.post(`${TELEGRAM_API}/sendMessage`, {
+            chat_id: chatId,
+            text: "⚠️ Unit nahi mili. Details check karein.",
+            parse_mode: "HTML"
+          });
+        }
+      }
+      // Admin: Delete Unit
       else if (text.startsWith('/del_unit')) {
         if (!isAdmin(from.id)) return;
         const parts = text.replace('/del_unit', '').trim().split('|').map((s) => s.trim());
@@ -991,33 +1052,19 @@ app.post('/webhook', async (req, res) => {
         const bucket = getSubjectBucket(category, course, periodKey, studyType, false);
         if (bucket && bucket.subjects[subjectName] && bucket.subjects[subjectName].units && bucket.subjects[subjectName].units[unitName]) {
           delete bucket.subjects[subjectName].units[unitName];
-          saveData();
+          persistAll();
           await axios.post(`${TELEGRAM_API}/sendMessage`, {
             chat_id: chatId,
-            text: `🗑️ <b>Unit Removed:</b> <code>${unitName}</code> (${subjectName})`,
+            text: `🗑️ <b>Unit Removed:</b> <code>${escapeHtml(unitName)}</code> (${escapeHtml(subjectName)})`,
             parse_mode: "HTML"
           });
         } else {
           await axios.post(`${TELEGRAM_API}/sendMessage`, {
             chat_id: chatId,
-            text: "⚠️ Ye unit nahi mili. Spelling/format check karein.",
+            text: "⚠️ Ye unit nahi mili.",
             parse_mode: "HTML"
           });
         }
-      }
-      else if (text.startsWith('/addupdate')) {
-        if (!isAdmin(from.id)) return;
-        const updateMsg = text.replace('/addupdate', '').trim();
-        for (const uid in studyDb.users) {
-          try {
-            await axios.post(`${TELEGRAM_API}/sendMessage`, {
-              chat_id: uid,
-              text: `📢 <b>STUDY MATERIAL BOT UPDATE</b>\n\n${updateMsg}`,
-              parse_mode: "HTML"
-            });
-          } catch (e) {}
-        }
-        await axios.post(`${TELEGRAM_API}/sendMessage`, { chat_id: chatId, text: "✅ Broadcast sent!" });
       }
       else if (user.selectedType === "AI Assistant" && text.length > 0) {
         const reply = buildSmartAiAssistantResponse(text);
@@ -1043,6 +1090,8 @@ app.post('/webhook', async (req, res) => {
       };
 
       if (data === "main_menu") {
+        user.activeMockSession = null;
+        persistAll();
         await deletePrevMessage();
         const menu = getMainMenuMarkup(user);
         await axios.post(`${TELEGRAM_API}/sendMessage`, {
@@ -1067,22 +1116,14 @@ app.post('/webhook', async (req, res) => {
         user.selectedStream = null;
         user.selectedYear = null;
         user.selectedSemester = null;
-        saveData();
+        persistAll();
 
         await deletePrevMessage();
 
         if (typeName === "AI Assistant") {
           await axios.post(`${TELEGRAM_API}/sendMessage`, {
             chat_id: chatId,
-            text:
-`🤖 <b>AI ASSISTANT READY</b>
-
-Kisi bhi topic ya question ke baare mein poochhein (Hinglish, English, ya Hindi mein).
-Bot admin ki uploaded PDFs mein se topic dhoondh kar:
-• Handwritten style notes dega
-• Batayega kis-kis type ke questions ban sakte hain
-• Kaun-kaun se questions ban chuke hain
-• Aur answer kaise likhna hai, sab samjhayega!`,
+            text: "🤖 <b>AI ASSISTANT READY</b>\n\nApna topic ya sawaal likhein.",
             parse_mode: "HTML",
             reply_markup: {
               inline_keyboard: [[{ text: "🔙 Main Menu", callback_data: "main_menu" }]]
@@ -1091,27 +1132,26 @@ Bot admin ki uploaded PDFs mein se topic dhoondh kar:
           return;
         }
 
-        const catButtons = CATEGORY_LIST.map((catName, cIdx) => [
+        const catList = getCategoryList();
+        const catButtons = catList.map((catName, cIdx) => [
           { text: `🎓 ${catName}`, callback_data: `cat_${cIdx}` }
         ]);
         catButtons.push([{ text: "🔙 Main Menu", callback_data: "main_menu" }]);
 
         await axios.post(`${TELEGRAM_API}/sendMessage`, {
           chat_id: chatId,
-          text: `📚 <b>${typeName.toUpperCase()}</b>\n\nCategory chunein:`,
+          text: `📚 <b>${escapeHtml(typeName.toUpperCase())}</b>\n\nCategory chunein:`,
           parse_mode: "HTML",
           reply_markup: { inline_keyboard: catButtons }
         });
       }
       else if (data.startsWith("cat_")) {
         const cIdx = parseInt(data.replace("cat_", ""), 10);
-        const catName = CATEGORY_LIST[cIdx];
+        const catList = getCategoryList();
+        const catName = catList[cIdx];
         const courses = CATEGORIES[catName] || [];
         user.selectedCategory = catName;
-        user.selectedStream = null;
-        user.selectedYear = null;
-        user.selectedSemester = null;
-        saveData();
+        persistAll();
 
         await deletePrevMessage();
         const courseButtons = courses.map((courseName, sIdx) => [
@@ -1121,7 +1161,7 @@ Bot admin ki uploaded PDFs mein se topic dhoondh kar:
 
         await axios.post(`${TELEGRAM_API}/sendMessage`, {
           chat_id: chatId,
-          text: `⚡ <b>${catName.toUpperCase()} — ${user.selectedType}</b>\n\nApna <b>Course</b> chunein:`,
+          text: `⚡ <b>${escapeHtml(catName.toUpperCase())} — ${escapeHtml(user.selectedType || "")}</b>\n\nApna <b>Course</b> chunein:`,
           parse_mode: "HTML",
           reply_markup: { inline_keyboard: courseButtons }
         });
@@ -1130,15 +1170,13 @@ Bot admin ki uploaded PDFs mein se topic dhoondh kar:
         const [, cIdxStr, sIdxStr] = data.split("_");
         const cIdx = parseInt(cIdxStr, 10);
         const sIdx = parseInt(sIdxStr, 10);
-        const catName = CATEGORY_LIST[cIdx];
+        const catName = getCategoryList()[cIdx];
         const courseName = (CATEGORIES[catName] || [])[sIdx];
         const studyType = user.selectedType || "Syllabus";
 
         user.selectedCategory = catName;
         user.selectedStream = courseName;
-        user.selectedYear = null;
-        user.selectedSemester = null;
-        saveData();
+        persistAll();
 
         await deletePrevMessage();
 
@@ -1155,7 +1193,7 @@ Bot admin ki uploaded PDFs mein se topic dhoondh kar:
 
           await axios.post(`${TELEGRAM_API}/sendMessage`, {
             chat_id: chatId,
-            text: `🔗 <b>${studyType} — ${catName} (${courseName})</b>\n\n${body}`,
+            text: `🔗 <b>${escapeHtml(studyType)} — ${escapeHtml(courseName)}</b>\n\n${body}`,
             parse_mode: "HTML",
             disable_web_page_preview: true,
             reply_markup: {
@@ -1177,7 +1215,7 @@ Bot admin ki uploaded PDFs mein se topic dhoondh kar:
 
           await axios.post(`${TELEGRAM_API}/sendMessage`, {
             chat_id: chatId,
-            text: `🎓 <b>${courseName} — ${studyType}</b>\n\nApna <b>Year</b> chunein:`,
+            text: `🎓 <b>${escapeHtml(courseName)} — ${escapeHtml(studyType)}</b>\n\nApna <b>Year</b> chunein:`,
             parse_mode: "HTML",
             reply_markup: { inline_keyboard: yearButtons }
           });
@@ -1192,7 +1230,7 @@ Bot admin ki uploaded PDFs mein se topic dhoondh kar:
 
         await axios.post(`${TELEGRAM_API}/sendMessage`, {
           chat_id: chatId,
-          text: `🎓 <b>${courseName} — ${studyType}</b>\n\nApna <b>Semester</b> chunein:`,
+          text: `🎓 <b>${escapeHtml(courseName)} — ${escapeHtml(studyType)}</b>\n\nApna <b>Semester</b> chunein:`,
           parse_mode: "HTML",
           reply_markup: { inline_keyboard: semButtons }
         });
@@ -1203,16 +1241,13 @@ Bot admin ki uploaded PDFs mein se topic dhoondh kar:
         const sIdx = parseInt(sIdxStr, 10);
         const yIdx = parseInt(yIdxStr, 10);
 
-        const catName = CATEGORY_LIST[cIdx];
+        const catName = getCategoryList()[cIdx];
         const courseName = CATEGORIES[catName][sIdx];
         const yearName = getYearsForCourse(catName, courseName)[yIdx];
         const studyType = user.selectedType || "Syllabus";
 
-        user.selectedCategory = catName;
-        user.selectedStream = courseName;
         user.selectedYear = yearName;
-        user.selectedSemester = null;
-        saveData();
+        persistAll();
 
         await deletePrevMessage();
 
@@ -1224,7 +1259,7 @@ Bot admin ki uploaded PDFs mein se topic dhoondh kar:
 
         await axios.post(`${TELEGRAM_API}/sendMessage`, {
           chat_id: chatId,
-          text: `🎓 <b>${courseName} — ${yearName}</b>\n📚 Module: <b>${studyType}</b>\n\nApna <b>Semester</b> chunein:`,
+          text: `🎓 <b>${escapeHtml(courseName)} — ${escapeHtml(yearName)}</b>\n📚 Module: <b>${escapeHtml(studyType)}</b>\n\nApna <b>Semester</b> chunein:`,
           parse_mode: "HTML",
           reply_markup: { inline_keyboard: semButtons }
         });
@@ -1235,18 +1270,15 @@ Bot admin ki uploaded PDFs mein se topic dhoondh kar:
         const sIdx = parseInt(sIdxStr, 10);
         const semIdx = parseInt(semIdxStr, 10);
 
-        const catName = CATEGORY_LIST[cIdx];
+        const catName = getCategoryList()[cIdx];
         const courseName = CATEGORIES[catName][sIdx];
         const yearName = yPart === "n" ? null : getYearsForCourse(catName, courseName)[parseInt(yPart, 10)];
         const semName = getSemestersForCourse(catName, courseName, yearName)[semIdx];
         const studyType = user.selectedType || "Syllabus";
         const periodKey = buildPeriodStorageKey(yearName, semName);
 
-        user.selectedCategory = catName;
-        user.selectedStream = courseName;
-        user.selectedYear = yearName;
         user.selectedSemester = semName;
-        saveData();
+        persistAll();
 
         await deletePrevMessage();
 
@@ -1257,7 +1289,7 @@ Bot admin ki uploaded PDFs mein se topic dhoondh kar:
         if (subjects.length === 0) {
           await axios.post(`${TELEGRAM_API}/sendMessage`, {
             chat_id: chatId,
-            text: `📘 <b>${courseName} > ${periodKey} — ${studyType}</b>\n\nIs semester mein abhi koi subject add nahi hua hai.`,
+            text: `📘 <b>${escapeHtml(courseName)} > ${escapeHtml(periodKey)} — ${escapeHtml(studyType)}</b>\n\nIs semester mein abhi koi subject add nahi hua hai.`,
             parse_mode: "HTML",
             reply_markup: {
               inline_keyboard: [[{ text: "🔙 Main Menu", callback_data: "main_menu" }]]
@@ -1273,7 +1305,7 @@ Bot admin ki uploaded PDFs mein se topic dhoondh kar:
 
         await axios.post(`${TELEGRAM_API}/sendMessage`, {
           chat_id: chatId,
-          text: `🗓️ <b>${courseName} — ${periodKey} (${studyType})</b>\n\nApna <b>Subject</b> chunein:`,
+          text: `🗓️ <b>${escapeHtml(courseName)} — ${escapeHtml(periodKey)} (${escapeHtml(studyType)})</b>\n\nApna <b>Subject</b> chunein:`,
           parse_mode: "HTML",
           reply_markup: { inline_keyboard: subjButtons }
         });
@@ -1286,7 +1318,7 @@ Bot admin ki uploaded PDFs mein se topic dhoondh kar:
         const tIdx = parseInt(tIdxStr, 10);
         const sbIdx = parseInt(sbIdxStr, 10);
 
-        const catName = CATEGORY_LIST[cIdx];
+        const catName = getCategoryList()[cIdx];
         const courseName = CATEGORIES[catName][sIdx];
         const yearName = yPart === "n" ? null : getYearsForCourse(catName, courseName)[parseInt(yPart, 10)];
         const semName = getSemestersForCourse(catName, courseName, yearName)[semIdx];
@@ -1309,21 +1341,16 @@ Bot admin ki uploaded PDFs mein se topic dhoondh kar:
               .map((uName, idx) => {
                 const tList = unitsObj[uName].topics || [];
                 const topicLines = tList.length > 0
-                  ? tList.map((tp, tIndex) => `   ${tIndex + 1}. ${tp}`).join("\n")
-                  : "   • (Is unit ke topics add karna baaki hai)";
-                return `📂 <b>Unit ${idx + 1}: ${uName}</b>\n${topicLines}`;
+                  ? tList.map((tp, tIndex) => `   ${tIndex + 1}. ${escapeHtml(tp)}`).join("\n")
+                  : "   • (Topics add karna baaki hai)";
+                return `📂 <b>Unit ${idx + 1}: ${escapeHtml(uName)}</b>\n${topicLines}`;
               })
               .join("\n\n──────────────────────\n\n");
           }
 
           await axios.post(`${TELEGRAM_API}/sendMessage`, {
             chat_id: chatId,
-            text:
-`📖 <b>SYLLABUS — ${subjectName}</b>
-🎓 <b>Course:</b> ${courseName} (${periodKey})
-📊 <b>Total Units:</b> ${unitNames.length}
-
-${syllabusBody}`,
+            text: `📖 <b>SYLLABUS — ${escapeHtml(subjectName || "")}</b>\n🎓 <b>Course:</b> ${escapeHtml(courseName)} (${escapeHtml(periodKey)})\n\n${syllabusBody}`,
             parse_mode: "HTML",
             reply_markup: {
               inline_keyboard: [[{ text: "🔙 Main Menu", callback_data: "main_menu" }]]
@@ -1335,7 +1362,7 @@ ${syllabusBody}`,
         if (unitNames.length === 0) {
           await axios.post(`${TELEGRAM_API}/sendMessage`, {
             chat_id: chatId,
-            text: `📂 <b>${subjectName} — ${studyType}</b>\n\nIs subject mein abhi koi unit / chapter available nahi hai.`,
+            text: `📂 <b>${escapeHtml(subjectName || "")} — ${escapeHtml(studyType)}</b>\n\nIs subject mein abhi koi unit available nahi hai.`,
             parse_mode: "HTML",
             reply_markup: {
               inline_keyboard: [[{ text: "🔙 Main Menu", callback_data: "main_menu" }]]
@@ -1351,13 +1378,16 @@ ${syllabusBody}`,
 
         await axios.post(`${TELEGRAM_API}/sendMessage`, {
           chat_id: chatId,
-          text: `📘 <b>${subjectName} — ${studyType}</b>\n\nUnit / Chapter chunein:`,
+          text: `📘 <b>${escapeHtml(subjectName || "")} — ${escapeHtml(studyType)}</b>\n\nUnit / Chapter chunein:`,
           parse_mode: "HTML",
           reply_markup: { inline_keyboard: unitButtons }
         });
       }
       else if (data.startsWith("sunit_")) {
-        const [, cIdxStr, sIdxStr, yPart, semIdxStr, tIdxStr, sbIdxStr, uIdxStr] = data.split("_");
+        const parts = data.split("_");
+        const navSuffix = parts.slice(1).join("_");
+        const [cIdxStr, sIdxStr, yPart, semIdxStr, tIdxStr, sbIdxStr, uIdxStr] = parts.slice(1);
+
         const cIdx = parseInt(cIdxStr, 10);
         const sIdx = parseInt(sIdxStr, 10);
         const semIdx = parseInt(semIdxStr, 10);
@@ -1365,7 +1395,7 @@ ${syllabusBody}`,
         const sbIdx = parseInt(sbIdxStr, 10);
         const uIdx = parseInt(uIdxStr, 10);
 
-        const catName = CATEGORY_LIST[cIdx];
+        const catName = getCategoryList()[cIdx];
         const courseName = CATEGORIES[catName][sIdx];
         const yearName = yPart === "n" ? null : getYearsForCourse(catName, courseName)[parseInt(yPart, 10)];
         const semName = getSemestersForCourse(catName, courseName, yearName)[semIdx];
@@ -1380,26 +1410,12 @@ ${syllabusBody}`,
         await deletePrevMessage();
 
         if (studyType === "Hand Written Notes") {
-          const lang = detectLanguage(unitName || "");
-          const combinedPdfText = (studyDb.uploadedPdfs || [])
-            .filter((p) =>
-              (!p.subjectName || p.subjectName.toLowerCase().includes((subjectName || "").toLowerCase())) &&
-              p.extractedText
-            )
-            .map((p) => p.extractedText)
-            .join("\n");
-
-          const sourceText =
-            (unitRec && unitRec.handwrittenNotes) ||
-            combinedPdfText ||
-            (unitRec && (unitRec.topics || []).join("\n")) ||
-            "";
-
-          const noteMessages = buildHandwrittenMessages(sourceText, `${subjectName} — ${unitName}`, lang);
+          const rawNotes = (unitRec && unitRec.handwrittenNotes) || "";
+          const noteMessages = buildHandwrittenMessages(rawNotes, `${subjectName} — ${unitName}`);
 
           for (let i = 0; i < noteMessages.length; i++) {
             const isLast = i === noteMessages.length - 1;
-            const partLabel = noteMessages.length > 1 ? `\n📄 *Part ${i + 1} / ${noteMessages.length}*` : "";
+            const partLabel = noteMessages.length > 1 ? `\n📄 *Page ${i + 1} / ${noteMessages.length}*` : "";
 
             await axios.post(`${TELEGRAM_API}/sendMessage`, {
               chat_id: chatId,
@@ -1414,38 +1430,147 @@ ${syllabusBody}`,
         }
 
         if (studyType === "PYQ Question") {
-          const pyqs = (unitRec && unitRec.pyqQuestions) || [];
-          const body = pyqs.length > 0
-            ? pyqs.map((q, i) => `${i + 1}. ${q}`).join("\n\n")
-            : "Is chapter / unit mein abhi koi PYQ question add nahi hua hai.";
-
+          const st = (unitRec && unitRec.pyqStructured) || { mcq: [], short: [], long: [] };
           await axios.post(`${TELEGRAM_API}/sendMessage`, {
             chat_id: chatId,
-            text: `📝 <b>PYQ QUESTIONS — ${unitName}</b>\n📘 Subject: ${subjectName}\n\n${body}`,
+            text:
+`📝 <b>PYQ QUESTION BANK — ${escapeHtml(unitName || "")}</b>
+📘 <b>Subject:</b> ${escapeHtml(subjectName || "")}
+
+Available PYQs (5-5 ke Set mein Question + Answer):
+• MCQ PYQs: <b>${st.mcq.length}</b>
+• Short Questions: <b>${st.short.length}</b>
+• Long Questions: <b>${st.long.length}</b>
+
+Question type chunein:`,
             parse_mode: "HTML",
             reply_markup: {
-              inline_keyboard: [[{ text: "🔙 Main Menu", callback_data: "main_menu" }]]
+              inline_keyboard: [
+                [{ text: `🧠 MCQ (${st.mcq.length})`, callback_data: `pyqset_mcq_0_${navSuffix}` }],
+                [{ text: `✍️ Short (${st.short.length})`, callback_data: `pyqset_short_0_${navSuffix}` }],
+                [{ text: `📖 Long (${st.long.length})`, callback_data: `pyqset_long_0_${navSuffix}` }],
+                [{ text: "🔙 Main Menu", callback_data: "main_menu" }]
+              ]
             }
           });
           return;
         }
 
         if (studyType === "Mock Test") {
-          const mocks = (unitRec && unitRec.mockQuestions) || [];
-          const fallbackTopics = (unitRec && unitRec.topics) || [];
-          const body = mocks.length > 0
-            ? mocks.map((q, i) => `Q${i + 1}. ${q}`).join("\n\n")
-            : fallbackTopics.length > 0
-              ? fallbackTopics.map((tp, i) => `Q${i + 1}. Explain "${tp}" with key points and examples.`).join("\n\n")
-              : "Is chapter / unit mein abhi koi Mock Test question available nahi hai.";
+          const qSet = (unitRec && Array.isArray(unitRec.mockMcqSet) && unitRec.mockMcqSet.length > 0)
+            ? unitRec.mockMcqSet.slice(0, 20)
+            : generateStudyMaterialsFromPdfText(
+                (unitRec && unitRec.handwrittenNotes) || "",
+                subjectName || "",
+                unitName || ""
+              ).mockMcqSet;
+
+          user.activeMockSession = {
+            subjectName: subjectName || "",
+            unitName: unitName || "",
+            navSuffix,
+            questions: qSet,
+            currentIndex: 0,
+            correctCount: 0,
+            wrongCount: 0,
+            skippedCount: 0
+          };
+          persistAll();
+
+          const firstView = renderMockQuestionMessage(user.activeMockSession);
+          await axios.post(`${TELEGRAM_API}/sendMessage`, {
+            chat_id: chatId,
+            text: firstView.text,
+            parse_mode: "HTML",
+            reply_markup: firstView.reply_markup
+          });
+        }
+      }
+      else if (data.startsWith("pyqset_")) {
+        const [, pyqType, setIdxStr, ...navParts] = data.split("_");
+        const navSuffix = navParts.join("_");
+        const [cIdxStr, sIdxStr, yPart, semIdxStr, tIdxStr, sbIdxStr, uIdxStr] = navParts;
+
+        const cIdx = parseInt(cIdxStr, 10);
+        const sIdx = parseInt(sIdxStr, 10);
+        const semIdx = parseInt(semIdxStr, 10);
+        const tIdx = parseInt(tIdxStr, 10);
+        const sbIdx = parseInt(sbIdxStr, 10);
+        const uIdx = parseInt(uIdxStr, 10);
+
+        const catName = getCategoryList()[cIdx];
+        const courseName = CATEGORIES[catName][sIdx];
+        const yearName = yPart === "n" ? null : getYearsForCourse(catName, courseName)[parseInt(yPart, 10)];
+        const semName = getSemestersForCourse(catName, courseName, yearName)[semIdx];
+        const studyType = ALLOWED_STUDY_TYPES[tIdx];
+        const periodKey = buildPeriodStorageKey(yearName, semName);
+
+        const bucket = getSubjectBucket(catName, courseName, periodKey, studyType, false);
+        const subjectName = bucket ? Object.keys(bucket.subjects)[sbIdx] : "";
+        const unitName = subjectName ? Object.keys(bucket.subjects[subjectName].units || {})[uIdx] : "";
+        const unitRec = unitName ? bucket.subjects[subjectName].units[unitName] : null;
+
+        await deletePrevMessage();
+        const pyqView = renderPyqSetMessage(unitRec, pyqType, parseInt(setIdxStr, 10), subjectName, unitName, navSuffix);
+        await axios.post(`${TELEGRAM_API}/sendMessage`, {
+          chat_id: chatId,
+          text: pyqView.text,
+          parse_mode: "HTML",
+          reply_markup: pyqView.reply_markup
+        });
+      }
+      else if (data.startsWith("mockans_")) {
+        const [, qIdxStr, chosenOption] = data.split("_");
+        const qIdx = parseInt(qIdxStr, 10);
+        const session = user.activeMockSession;
+
+        if (!session || !Array.isArray(session.questions) || qIdx !== session.currentIndex) {
+          await deletePrevMessage();
+          return;
+        }
+
+        const currentQ = session.questions[qIdx];
+        let feedbackLine = "";
+
+        if (chosenOption === "E") {
+          session.skippedCount += 1;
+          feedbackLine = `⏭️ <b>Question ${qIdx + 1} Chhod Diya (Skipped)</b> | Sahi Uttar: <b>${escapeHtml(currentQ.correctOption)}</b>`;
+        } else if (chosenOption === currentQ.correctOption) {
+          session.correctCount += 1;
+          feedbackLine = `✅ <b>Sahi Uttar (${escapeHtml(chosenOption)})!</b>`;
+        } else {
+          session.wrongCount += 1;
+          feedbackLine = `❌ <b>Galat Uttar (${escapeHtml(chosenOption)})!</b> Sahi Uttar: <b>${escapeHtml(currentQ.correctOption)}</b>`;
+        }
+
+        session.currentIndex += 1;
+        await deletePrevMessage();
+
+        await axios.post(`${TELEGRAM_API}/sendMessage`, {
+          chat_id: chatId,
+          text: feedbackLine,
+          parse_mode: "HTML"
+        });
+
+        if (session.currentIndex >= session.questions.length) {
+          const summary = renderMockSummaryMessage(session);
+          user.activeMockSession = null;
+          persistAll();
 
           await axios.post(`${TELEGRAM_API}/sendMessage`, {
             chat_id: chatId,
-            text: `🎯 <b>MOCK TEST — ${unitName}</b>\n📘 Subject: ${subjectName}\n\n${body}`,
+            text: summary.text,
             parse_mode: "HTML",
-            reply_markup: {
-              inline_keyboard: [[{ text: "🔙 Main Menu", callback_data: "main_menu" }]]
-            }
+            reply_markup: summary.reply_markup
+          });
+        } else {
+          persistAll();
+          const nextView = renderMockQuestionMessage(session);
+          await axios.post(`${TELEGRAM_API}/sendMessage`, {
+            chat_id: chatId,
+            text: nextView.text,
+            parse_mode: "HTML",
+            reply_markup: nextView.reply_markup
           });
         }
       }
