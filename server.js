@@ -1,5 +1,5 @@
 // ============================================
-// TATSAR STUDY BOT - SERVER.JS
+// TATSAR STUDY BOT - UPDATED SERVER.JS
 // PART 1/3
 // ============================================
 
@@ -15,16 +15,19 @@ const app = express();
 app.use(express.json());
 
 const TOKEN = process.env.BOT_TOKEN;
-const ADMIN_IDS = (process.env.ADMIN_IDS || "8833629094")
-  .split(",")
-  .map(id => id.trim());
+
+const ADMIN_IDS = (
+  process.env.ADMIN_IDS || "8833629094"
+).split(",").map(id => id.trim());
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const OPENAI_MODEL =
+  process.env.OPENAI_MODEL || "gpt-4o-mini";
+
 const PORT = process.env.PORT || 3000;
 
 if (!TOKEN) {
-  console.error("ERROR: BOT_TOKEN environment variable missing.");
+  console.error("BOT_TOKEN missing!");
   process.exit(1);
 }
 
@@ -33,6 +36,10 @@ const bot = new TelegramBot(TOKEN, {
 });
 
 const DB_FILE = path.join(__dirname, "data.json");
+
+// ============================================
+// DATABASE
+// ============================================
 
 const DEFAULT_DB = {
   courses: {
@@ -62,6 +69,7 @@ function loadDB() {
         DB_FILE,
         JSON.stringify(DEFAULT_DB, null, 2)
       );
+
       return JSON.parse(JSON.stringify(DEFAULT_DB));
     }
 
@@ -73,10 +81,17 @@ function loadDB() {
       data.courses = DEFAULT_DB.courses;
     }
 
+    for (const key of Object.keys(DEFAULT_DB.courses)) {
+      if (!data.courses[key]) {
+        data.courses[key] = DEFAULT_DB.courses[key];
+      }
+    }
+
     return data;
 
   } catch (error) {
-    console.error("DATABASE LOAD ERROR:", error.message);
+    console.error("DATABASE ERROR:", error.message);
+
     return JSON.parse(JSON.stringify(DEFAULT_DB));
   }
 }
@@ -90,12 +105,12 @@ function saveDB() {
       JSON.stringify(db, null, 2)
     );
   } catch (error) {
-    console.error("DATABASE SAVE ERROR:", error.message);
+    console.error("SAVE ERROR:", error.message);
   }
 }
 
 // ============================================
-// USER SESSIONS
+// USER SESSION
 // ============================================
 
 const sessions = {};
@@ -122,12 +137,12 @@ function isAdmin(userId) {
 }
 
 // ============================================
-// BUTTON LABELS
+// BUTTON SYSTEM
 // ============================================
 
 const BUTTONS = {
   syllabus: "🟩 Syllabus",
-  notes: "🟦 Handwritten Notes",
+  notes: "🟩 Handwritten Notes",
   pyq: "🟩 PYQ Questions",
   mcq: "🟩 MCQ Questions",
   mock: "🟩 Mock Test",
@@ -138,8 +153,8 @@ const BUTTONS = {
   cet: "🟩 Rajasthan CET",
   class12: "🟩 12th Class",
 
-  back: "⬅️ Back",
-  home: "🏠 Main Menu"
+  back: "🟩 Back",
+  home: "🟩 Main Menu"
 };
 
 const FEATURE_NAMES = {
@@ -160,11 +175,14 @@ const COURSE_NAMES = {
 
 // ============================================
 // PAGE SYSTEM
-// Deletes the previous bot page before sending
-// a new one.
 // ============================================
 
-async function sendPage(chatId, userId, text, keyboard, options = {}) {
+async function sendPage(
+  chatId,
+  userId,
+  messageText,
+  keyboard
+) {
   const session = getSession(userId);
 
   if (session.lastBotMessageId) {
@@ -173,24 +191,19 @@ async function sendPage(chatId, userId, text, keyboard, options = {}) {
         chatId,
         session.lastBotMessageId
       );
-    } catch (error) {
-      // Message may already be deleted or too old.
-    }
-
-    session.lastBotMessageId = null;
+    } catch (error) {}
   }
 
   const message = await bot.sendMessage(
     chatId,
-    text,
+    messageText,
     {
       parse_mode: "HTML",
       reply_markup: {
-        keyboard: keyboard,
+        keyboard,
         resize_keyboard: true,
         is_persistent: true
-      },
-      ...options
+      }
     }
   );
 
@@ -200,7 +213,7 @@ async function sendPage(chatId, userId, text, keyboard, options = {}) {
 }
 
 // ============================================
-// MAIN MENU KEYBOARD
+// MAIN MENU
 // ============================================
 
 function mainKeyboard() {
@@ -222,19 +235,19 @@ async function sendHome(chatId, userId) {
   session.awaitingQuestion = false;
   session.step = "home";
 
-  const text =
-    "🌸 <b>WELCOME TO TATSAR STUDY BOT</b> 🌸\n\n" +
-    "📚 Your Complete Study Assistant\n\n" +
-    "📝 Notes and study material\n" +
-    "📖 PYQ and MCQ questions\n" +
-    "🧪 Mock tests\n" +
-    "🤖 AI Study Assistant\n\n" +
-    "👇 Select an option below:";
-
   return sendPage(
     chatId,
     userId,
-    text,
+
+    "🌸 <b>WELCOME TO TATSAR STUDY BOT</b> 🌸\n\n" +
+    "📚 Your Complete Study Assistant\n\n" +
+    "📝 Handwritten Study Notes\n" +
+    "📖 Syllabus and PYQ Questions\n" +
+    "🧠 MCQ Questions\n" +
+    "🧪 Mock Test\n" +
+    "🤖 AI Study Assistant\n\n" +
+    "👇 <b>Apna study option select karein:</b>",
+
     mainKeyboard()
   );
 }
@@ -245,22 +258,21 @@ async function sendHome(chatId, userId) {
 
 async function sendCourses(chatId, userId) {
   const session = getSession(userId);
+
   session.step = "courses";
-
-  const text =
-    "📚 <b>Apna course select karein:</b>";
-
-  const keyboard = [
-    [BUTTONS.bp, BUTTONS.dp],
-    [BUTTONS.cet, BUTTONS.class12],
-    [BUTTONS.home]
-  ];
 
   return sendPage(
     chatId,
     userId,
-    text,
-    keyboard
+
+    "📚 <b>SELECT YOUR COURSE</b>\n\n" +
+    "Apna course select karein:",
+
+    [
+      [BUTTONS.bp, BUTTONS.dp],
+      [BUTTONS.cet, BUTTONS.class12],
+      [BUTTONS.back, BUTTONS.home]
+    ]
   );
 }
 
@@ -268,22 +280,20 @@ async function sendCourses(chatId, userId) {
 // GET COURSE DATA
 // ============================================
 
-function getCourse(courseCode) {
-  return db.courses[courseCode] || null;
+function getCourse(code) {
+  return db.courses[code] || null;
 }
 
-function getSemesters(courseCode) {
-  const course = getCourse(courseCode);
+function getSemesters(code) {
+  const course = getCourse(code);
 
-  if (!course || !course.semesters) {
-    return [];
-  }
-
-  return Object.keys(course.semesters);
+  return course
+    ? Object.keys(course.semesters || {})
+    : [];
 }
 
-function getUnits(courseCode, semester) {
-  const course = getCourse(courseCode);
+function getUnits(code, semester) {
+  const course = getCourse(code);
 
   if (!course || !course.semesters[semester]) {
     return [];
@@ -294,8 +304,8 @@ function getUnits(courseCode, semester) {
   );
 }
 
-function getChapters(courseCode, semester, unit) {
-  const course = getCourse(courseCode);
+function getChapters(code, semester, unit) {
+  const course = getCourse(code);
 
   if (
     !course ||
@@ -305,7 +315,8 @@ function getChapters(courseCode, semester, unit) {
     return {};
   }
 
-  return course.semesters[semester].units[unit].chapters || {};
+  return course.semesters[semester]
+    .units[unit].chapters || {};
 }
 
 // ============================================
@@ -314,6 +325,7 @@ function getChapters(courseCode, semester, unit) {
 
 async function sendSemesters(chatId, userId) {
   const session = getSession(userId);
+
   const course = getCourse(session.course);
 
   if (!course) {
@@ -328,17 +340,20 @@ async function sendSemesters(chatId, userId) {
     return sendPage(
       chatId,
       userId,
-      "❌ <b>Abhi is course ka content available nahi hai.</b>\n\n" +
+
+      "❌ <b>Content available nahi hai.</b>\n\n" +
       "Admin se content upload karwayein.",
-      [[BUTTONS.home]]
+
+      [[BUTTONS.back, BUTTONS.home]]
     );
   }
 
   const keyboard = [];
 
   for (let i = 0; i < semesters.length; i += 2) {
-    const row = semesters.slice(i, i + 2);
-    keyboard.push(row);
+    keyboard.push(
+      semesters.slice(i, i + 2)
+    );
   }
 
   keyboard.push([BUTTONS.back, BUTTONS.home]);
@@ -346,8 +361,10 @@ async function sendSemesters(chatId, userId) {
   return sendPage(
     chatId,
     userId,
-    "📚 <b>" + course.name + "</b>\n\n" +
+
+    "🎓 <b>" + course.name + "</b>\n\n" +
     "Apna semester / year select karein:",
+
     keyboard
   );
 }
@@ -370,7 +387,7 @@ async function sendUnits(chatId, userId) {
     return sendPage(
       chatId,
       userId,
-      "❌ Is semester mein abhi koi unit available nahi hai.",
+      "❌ Is semester mein koi unit available nahi hai.",
       [[BUTTONS.back, BUTTONS.home]]
     );
   }
@@ -386,8 +403,10 @@ async function sendUnits(chatId, userId) {
   return sendPage(
     chatId,
     userId,
+
     "📖 <b>" + session.semester + "</b>\n\n" +
     "Apni unit select karein:",
+
     keyboard
   );
 }
@@ -405,23 +424,23 @@ async function sendChapters(chatId, userId) {
     session.unit
   );
 
-  const chapterNames = Object.keys(chapters);
+  const names = Object.keys(chapters);
 
   session.step = "chapters";
 
-  if (!chapterNames.length) {
+  if (!names.length) {
     return sendPage(
       chatId,
       userId,
-      "❌ Is unit mein abhi koi chapter available nahi hai.",
+      "❌ Is unit mein koi chapter available nahi hai.",
       [[BUTTONS.back, BUTTONS.home]]
     );
   }
 
   const keyboard = [];
 
-  for (let i = 0; i < chapterNames.length; i += 2) {
-    keyboard.push(chapterNames.slice(i, i + 2));
+  for (let i = 0; i < names.length; i += 2) {
+    keyboard.push(names.slice(i, i + 2));
   }
 
   keyboard.push([BUTTONS.back, BUTTONS.home]);
@@ -429,14 +448,16 @@ async function sendChapters(chatId, userId) {
   return sendPage(
     chatId,
     userId,
+
     "📝 <b>" + session.unit + "</b>\n\n" +
     "Apna chapter select karein:",
+
     keyboard
   );
 }
 
 // ============================================
-// STUDY OPTIONS
+// STUDY CONTENT PAGE
 // ============================================
 
 async function sendStudyOptions(chatId, userId) {
@@ -444,22 +465,19 @@ async function sendStudyOptions(chatId, userId) {
 
   session.step = "study-options";
 
-  const keyboard = [
-    [BUTTONS.syllabus, BUTTONS.notes],
-    [BUTTONS.pyq, BUTTONS.mcq],
-    [BUTTONS.mock, BUTTONS.ai],
-    [BUTTONS.back, BUTTONS.home]
-  ];
-
-  const text =
-    "📚 <b>" + session.chapter + "</b>\n\n" +
-    "👇 Ab kya padhna chahte hain?";
-
   return sendPage(
     chatId,
     userId,
-    text,
-    keyboard
+
+    "📚 <b>" + session.chapter + "</b>\n\n" +
+    "👇 Apna study option select karein:",
+
+    [
+      [BUTTONS.syllabus, BUTTONS.notes],
+      [BUTTONS.pyq, BUTTONS.mcq],
+      [BUTTONS.mock, BUTTONS.ai],
+      [BUTTONS.back, BUTTONS.home]
+    ]
   );
 }
 // ============================================
@@ -495,17 +513,16 @@ async function generateAI(question, pdfText) {
     "https://api.openai.com/v1/chat/completions",
     {
       model: OPENAI_MODEL,
+
       messages: [
         {
           role: "system",
           content:
             "You are TATSAR Study Assistant. " +
-            "Answer using the supplied study material. " +
-            "Explain in simple Hinglish. " +
-            "Use headings, bullet points and examples. " +
-            "If the supplied material does not contain the answer, " +
-            "clearly say that the PDF does not provide enough information. " +
-            "Do not invent PDF facts."
+            "Explain everything in simple Hinglish. " +
+            "Use headings, examples and bullet points. " +
+            "Use the supplied PDF study material. " +
+            "Do not invent facts or actual previous year questions."
         },
         {
           role: "user",
@@ -516,8 +533,10 @@ async function generateAI(question, pdfText) {
             question
         }
       ],
+
       temperature: 0.4
     },
+
     {
       headers: {
         Authorization: "Bearer " + OPENAI_API_KEY,
@@ -534,7 +553,7 @@ async function generateAI(question, pdfText) {
 }
 
 // ============================================
-// GET SELECTED CHAPTER TEXT
+// SELECTED CHAPTER
 // ============================================
 
 function getSelectedChapter(userId) {
@@ -564,39 +583,43 @@ function getSelectedChapter(userId) {
 
 const FEATURE_PROMPTS = {
   syllabus:
-    "Is study material se detailed syllabus banao. " +
-    "Topics aur subtopics ko proper order mein likho.",
+    "Create a detailed syllabus from this study material. " +
+    "Include all topics and subtopics in proper order. " +
+    "Explain in Hinglish.",
 
   notes:
-    "Is study material se detailed study notes banao. " +
-    "Definitions, explanations, examples aur important points do. " +
-    "Notes simple Hinglish mein banao.",
+    "Create detailed handwritten-style study notes in text format. " +
+    "Include definitions, explanations, examples, important points, " +
+    "and exam-oriented information in Hinglish.",
 
   pyq:
-    "Is study material se exam-oriented previous-year-style questions banao. " +
-    "Questions ke saath detailed answers bhi do. " +
-    "Inhe actual previous-year questions claim mat karna.",
+    "Create 20 exam-oriented previous-year-style questions " +
+    "with detailed answers from this material. " +
+    "Do not claim these are verified actual PYQs.",
 
   mcq:
-    "Is study material se 20 MCQ questions banao. " +
-    "Har question ke 4 options aur correct answer do. " +
-    "Answer ki short explanation bhi do.",
+    "Create 20 MCQ questions with 4 options each. " +
+    "Provide correct answers and short explanations.",
 
   mock:
-    "Is study material par based 20-question mock test banao. " +
-    "Pehle questions aur options do, phir answer key alag do.",
+    "Create a 20-question mock test from this chapter. " +
+    "Give questions and options first, then a separate answer key.",
 
   ai:
-    "Is study material ka short overview do aur student ko " +
-    "is chapter ke baare mein questions poochhne ke liye bolo."
+    "Give a short overview of this chapter in simple Hinglish."
 };
 
 // ============================================
-// GENERATE FEATURE CONTENT
+// GENERATE FEATURE
 // ============================================
 
-async function generateForFeature(chatId, userId, feature) {
+async function generateForFeature(
+  chatId,
+  userId,
+  feature
+) {
   const session = getSession(userId);
+
   const chapterData = getSelectedChapter(userId);
 
   if (!chapterData || !chapterData.text) {
@@ -604,13 +627,11 @@ async function generateForFeature(chatId, userId, feature) {
 
     return bot.sendMessage(
       chatId,
-      "❌ Is chapter ka PDF content abhi available nahi hai."
+      "❌ Is chapter ka PDF content available nahi hai."
     );
   }
 
-  if (!FEATURE_NAMES[feature]) {
-    return;
-  }
+  if (!FEATURE_NAMES[feature]) return;
 
   session.feature = feature;
 
@@ -619,9 +640,11 @@ async function generateForFeature(chatId, userId, feature) {
 
     await bot.sendMessage(
       chatId,
-      "🤖 <b>AI Study Assistant</b>\n\n" +
+
+      "🤖 <b>AI STUDY ASSISTANT</b>\n\n" +
       "Is chapter se related apna question bhejein.\n\n" +
-      "Main uploaded study material ke basis par answer dunga.",
+      "Main uploaded PDF ke basis par answer dunga.",
+
       {
         parse_mode: "HTML"
       }
@@ -636,11 +659,11 @@ async function generateForFeature(chatId, userId, feature) {
       await sendLongMessage(chatId, overview);
 
     } catch (error) {
-      console.error("AI OVERVIEW ERROR:", error.message);
+      console.error("AI ERROR:", error.message);
 
       await bot.sendMessage(
         chatId,
-        "AI overview generate nahi ho paya. Aap apna question bhej sakte hain."
+        "❌ AI overview generate nahi ho paya."
       );
     }
 
@@ -648,6 +671,8 @@ async function generateForFeature(chatId, userId, feature) {
   }
 
   session.awaitingQuestion = false;
+
+  await bot.sendChatAction(chatId, "typing");
 
   await bot.sendMessage(
     chatId,
@@ -668,204 +693,250 @@ async function generateForFeature(chatId, userId, feature) {
 
     await bot.sendMessage(
       chatId,
-      "✅ Complete!\n\n" +
-      "Dusra option select karne ke liye Main Menu par jaayein."
+
+      "✅ <b>Content Complete!</b>\n\n" +
+      "Dusra option select karne ke liye neeche menu use karein.",
+
+      {
+        parse_mode: "HTML",
+        reply_markup: {
+          keyboard: [
+            [BUTTONS.syllabus, BUTTONS.notes],
+            [BUTTONS.pyq, BUTTONS.mcq],
+            [BUTTONS.mock, BUTTONS.ai],
+            [BUTTONS.back, BUTTONS.home]
+          ],
+          resize_keyboard: true,
+          is_persistent: true
+        }
+      }
     );
 
   } catch (error) {
     console.error(
-      "FEATURE GENERATION ERROR:",
+      "GENERATION ERROR:",
       error.response?.data || error.message
     );
 
     await bot.sendMessage(
       chatId,
-      "❌ Content generate nahi ho paya.\n" +
-      "API key aur OpenAI account check karein."
+      "❌ Content generate nahi ho paya.\n\n" +
+      "OpenAI API key, balance aur model check karein."
     );
   }
 }
 
 // ============================================
-// ADMIN: ADD SEMESTER / LEVEL
+// ADMIN: ADD SEMESTER
 // ============================================
 
-bot.onText(/^\/addsemester(?:@\w+)?(?:\s+([\s\S]+))?$/, (msg, match) => {
-  const userId = msg.from.id;
-  const chatId = msg.chat.id;
+bot.onText(
+  /^\/addsemester(?:@\w+)?(?:\s+([\s\S]+))?$/,
+  (msg, match) => {
 
-  if (!isAdmin(userId)) {
-    return bot.sendMessage(chatId, "⛔ Admin only command.");
-  }
+    const chatId = msg.chat.id;
 
-  const input = (match[1] || "").trim();
-  const parts = input.split("|").map(x => x.trim());
+    if (!isAdmin(msg.from.id)) {
+      return bot.sendMessage(
+        chatId,
+        "⛔ Admin only command."
+      );
+    }
 
-  if (parts.length < 2 || !db.courses[parts[0]]) {
+    const parts = (match[1] || "")
+      .split("|")
+      .map(x => x.trim());
+
+    if (
+      parts.length < 2 ||
+      !db.courses[parts[0]]
+    ) {
+      return bot.sendMessage(
+        chatId,
+        "Format:\n\n/addsemester bp|Semester 1\n\n" +
+        "Courses: bp, dp, cet, class12"
+      );
+    }
+
+    const [course, semester] = parts;
+
+    db.courses[course].semesters[semester] =
+      db.courses[course].semesters[semester] || {
+        units: {}
+      };
+
+    saveDB();
+
     return bot.sendMessage(
       chatId,
-      "Format:\n/addsemester bp|Semester 1\n\n" +
-      "Courses: bp, dp, cet, class12"
+      "✅ Semester add ho gaya!\n\n" +
+      db.courses[course].name + " - " + semester
     );
   }
-
-  const course = parts[0];
-  const semester = parts[1];
-
-  db.courses[course].semesters[semester] =
-    db.courses[course].semesters[semester] || {
-      units: {}
-    };
-
-  saveDB();
-
-  return bot.sendMessage(
-    chatId,
-    "✅ Semester / Level add ho gaya:\n" +
-    db.courses[course].name + " - " + semester
-  );
-});
+);
 
 // ============================================
 // ADMIN: ADD UNIT
 // ============================================
 
-bot.onText(/^\/addunit(?:@\w+)?(?:\s+([\s\S]+))?$/, (msg, match) => {
-  const userId = msg.from.id;
-  const chatId = msg.chat.id;
+bot.onText(
+  /^\/addunit(?:@\w+)?(?:\s+([\s\S]+))?$/,
+  (msg, match) => {
 
-  if (!isAdmin(userId)) {
-    return bot.sendMessage(chatId, "⛔ Admin only command.");
-  }
+    const chatId = msg.chat.id;
 
-  const parts = (match[1] || "")
-    .split("|")
-    .map(x => x.trim());
+    if (!isAdmin(msg.from.id)) {
+      return bot.sendMessage(
+        chatId,
+        "⛔ Admin only command."
+      );
+    }
 
-  if (
-    parts.length < 3 ||
-    !db.courses[parts[0]]
-  ) {
+    const parts = (match[1] || "")
+      .split("|")
+      .map(x => x.trim());
+
+    if (
+      parts.length < 3 ||
+      !db.courses[parts[0]]
+    ) {
+      return bot.sendMessage(
+        chatId,
+        "Format:\n\n/addunit bp|Semester 1|Unit 1"
+      );
+    }
+
+    const [course, semester, unit] = parts;
+
+    db.courses[course].semesters[semester] =
+      db.courses[course].semesters[semester] || {
+        units: {}
+      };
+
+    const semesterData =
+      db.courses[course].semesters[semester];
+
+    semesterData.units[unit] =
+      semesterData.units[unit] || {
+        chapters: {}
+      };
+
+    saveDB();
+
     return bot.sendMessage(
       chatId,
-      "Format:\n/addunit bp|Semester 1|Unit 1"
+      "✅ Unit successfully added!"
     );
   }
-
-  const [course, semester, unit] = parts;
-
-  db.courses[course].semesters[semester] =
-    db.courses[course].semesters[semester] || {
-      units: {}
-    };
-
-  const semesterData =
-    db.courses[course].semesters[semester];
-
-  semesterData.units[unit] =
-    semesterData.units[unit] || {
-      chapters: {}
-    };
-
-  saveDB();
-
-  return bot.sendMessage(
-    chatId,
-    "✅ Unit add ho gayi:\n" +
-    course + " | " + semester + " | " + unit
-  );
-});
+);
 
 // ============================================
 // ADMIN: ADD CHAPTER
 // ============================================
 
-bot.onText(/^\/addchapter(?:@\w+)?(?:\s+([\s\S]+))?$/, (msg, match) => {
-  const userId = msg.from.id;
-  const chatId = msg.chat.id;
+bot.onText(
+  /^\/addchapter(?:@\w+)?(?:\s+([\s\S]+))?$/,
+  (msg, match) => {
 
-  if (!isAdmin(userId)) {
-    return bot.sendMessage(chatId, "⛔ Admin only command.");
-  }
+    const chatId = msg.chat.id;
 
-  const parts = (match[1] || "")
-    .split("|")
-    .map(x => x.trim());
+    if (!isAdmin(msg.from.id)) {
+      return bot.sendMessage(
+        chatId,
+        "⛔ Admin only command."
+      );
+    }
 
-  if (
-    parts.length < 4 ||
-    !db.courses[parts[0]]
-  ) {
+    const parts = (match[1] || "")
+      .split("|")
+      .map(x => x.trim());
+
+    if (
+      parts.length < 4 ||
+      !db.courses[parts[0]]
+    ) {
+      return bot.sendMessage(
+        chatId,
+        "Format:\n\n" +
+        "/addchapter bp|Semester 1|Unit 1|Chapter 1"
+      );
+    }
+
+    const [course, semester, unit, chapter] = parts;
+
+    db.courses[course].semesters[semester] =
+      db.courses[course].semesters[semester] || {
+        units: {}
+      };
+
+    const semesterData =
+      db.courses[course].semesters[semester];
+
+    semesterData.units[unit] =
+      semesterData.units[unit] || {
+        chapters: {}
+      };
+
+    semesterData.units[unit].chapters[chapter] =
+      semesterData.units[unit].chapters[chapter] || {
+        text: "",
+        updatedAt: null
+      };
+
+    saveDB();
+
     return bot.sendMessage(
       chatId,
-      "Format:\n/addchapter bp|Semester 1|Unit 1|Chapter 1"
+      "✅ Chapter successfully added!\n\n" +
+      chapter
     );
   }
-
-  const [course, semester, unit, chapter] = parts;
-
-  db.courses[course].semesters[semester] =
-    db.courses[course].semesters[semester] || {
-      units: {}
-    };
-
-  const semesterData =
-    db.courses[course].semesters[semester];
-
-  semesterData.units[unit] =
-    semesterData.units[unit] || {
-      chapters: {}
-    };
-
-  const unitData = semesterData.units[unit];
-
-  unitData.chapters[chapter] =
-    unitData.chapters[chapter] || {
-      text: "",
-      updatedAt: null
-    };
-
-  saveDB();
-
-  return bot.sendMessage(
-    chatId,
-    "✅ Chapter add ho gaya:\n" +
-    course + " | " + semester + " | " +
-    unit + " | " + chapter
-  );
-});
+);
 
 // ============================================
 // ADMIN: VIEW STRUCTURE
 // ============================================
 
 bot.onText(/^\/structure(?:@\w+)?$/, msg => {
+
   const chatId = msg.chat.id;
 
   if (!isAdmin(msg.from.id)) {
-    return bot.sendMessage(chatId, "⛔ Admin only command.");
+    return bot.sendMessage(
+      chatId,
+      "⛔ Admin only command."
+    );
   }
 
   let output = "📚 <b>COURSE STRUCTURE</b>\n\n";
 
-  for (const courseCode of Object.keys(db.courses)) {
-    const course = db.courses[courseCode];
+  for (const code of Object.keys(db.courses)) {
+
+    const course = db.courses[code];
 
     output += "🎓 <b>" + course.name + "</b>\n";
 
-    for (const semester of Object.keys(course.semesters || {})) {
-      output += "  📖 " + semester + "\n";
+    for (const semester of Object.keys(
+      course.semesters || {}
+    )) {
 
-      const units = course.semesters[semester].units || {};
+      output += "📖 " + semester + "\n";
+
+      const units =
+        course.semesters[semester].units || {};
 
       for (const unit of Object.keys(units)) {
-        output += "    📘 " + unit + "\n";
+
+        output += "📘 " + unit + "\n";
 
         const chapters = units[unit].chapters || {};
 
         for (const chapter of Object.keys(chapters)) {
-          const uploaded = chapters[chapter].text ? "✅" : "❌";
-          output += "      " + uploaded + " " + chapter + "\n";
+
+          const uploaded =
+            chapters[chapter].text ? "✅" : "❌";
+
+          output += uploaded + " " + chapter + "\n";
         }
       }
     }
@@ -875,13 +946,134 @@ bot.onText(/^\/structure(?:@\w+)?$/, msg => {
 
   return sendLongMessage(chatId, output);
 });
+
+// ============================================
+// PDF UPLOAD HANDLER
+// ============================================
+
+async function handlePDF(msg) {
+
+  const chatId = msg.chat.id;
+  const userId = msg.from.id;
+
+  if (!isAdmin(userId)) {
+    return bot.sendMessage(
+      chatId,
+      "⛔ PDF upload sirf admin kar sakta hai."
+    );
+  }
+
+  const fileName = msg.document.file_name || "";
+
+  if (!fileName.toLowerCase().endsWith(".pdf")) {
+    return bot.sendMessage(
+      chatId,
+      "❌ Sirf PDF file upload karein."
+    );
+  }
+
+  const parts = (msg.caption || "")
+    .split("|")
+    .map(x => x.trim());
+
+  if (
+    parts.length < 4 ||
+    !db.courses[parts[0]]
+  ) {
+    return bot.sendMessage(
+      chatId,
+
+      "PDF ke saath caption likhein:\n\n" +
+      "bp|Semester 1|Unit 1|Chapter 1"
+    );
+  }
+
+  const [course, semester, unit, chapter] = parts;
+
+  try {
+
+    await bot.sendMessage(
+      chatId,
+      "⏳ PDF process ho rahi hai..."
+    );
+
+    const fileLink = await bot.getFileLink(
+      msg.document.file_id
+    );
+
+    const response = await axios.get(
+      fileLink,
+      {
+        responseType: "arraybuffer",
+        timeout: 120000,
+        maxContentLength: 20 * 1024 * 1024
+      }
+    );
+
+    const parsed = await pdfParse(
+      Buffer.from(response.data)
+    );
+
+    const extractedText = (parsed.text || "").trim();
+
+    if (!extractedText) {
+      return bot.sendMessage(
+        chatId,
+        "❌ PDF mein readable text nahi mila. OCR required hai."
+      );
+    }
+
+    db.courses[course].semesters[semester] =
+      db.courses[course].semesters[semester] || {
+        units: {}
+      };
+
+    const semesterData =
+      db.courses[course].semesters[semester];
+
+    semesterData.units[unit] =
+      semesterData.units[unit] || {
+        chapters: {}
+      };
+
+    semesterData.units[unit].chapters[chapter] = {
+      text: extractedText,
+      updatedAt: new Date().toISOString()
+    };
+
+    saveDB();
+
+    return bot.sendMessage(
+      chatId,
+
+      "✅ <b>PDF SUCCESSFULLY UPLOADED!</b>\n\n" +
+      "📚 Course: " + course + "\n" +
+      "📖 Semester: " + semester + "\n" +
+      "📘 Unit: " + unit + "\n" +
+      "📝 Chapter: " + chapter,
+
+      {
+        parse_mode: "HTML"
+      }
+    );
+
+  } catch (error) {
+
+    console.error("PDF ERROR:", error.message);
+
+    return bot.sendMessage(
+      chatId,
+      "❌ PDF process nahi ho payi."
+    );
+  }
+}
 // ============================================
 // TATSAR STUDY BOT
 // PART 3/3
 // ============================================
 
 // ============================================
-// DELETE CURRENT MENU PAGE
+// DELETE PREVIOUS PAGE
 // ============================================
 
 async function deleteCurrentPage(chatId, userId) {
@@ -894,25 +1086,27 @@ async function deleteCurrentPage(chatId, userId) {
       chatId,
       session.lastBotMessageId
     );
-  } catch (error) {
-    // Ignore delete errors.
-  }
+  } catch (error) {}
 
   session.lastBotMessageId = null;
 }
 
 // ============================================
-// BACK BUTTON
+// BACK NAVIGATION
 // ============================================
 
 async function goBack(chatId, userId) {
   const session = getSession(userId);
 
+  session.awaitingQuestion = false;
+
   if (session.step === "courses") {
+    session.feature = null;
     return sendHome(chatId, userId);
   }
 
   if (session.step === "semesters") {
+    session.course = null;
     return sendCourses(chatId, userId);
   }
 
@@ -935,10 +1129,14 @@ async function goBack(chatId, userId) {
 }
 
 // ============================================
-// COURSE BUTTON HANDLER
+// HANDLE COURSE
 // ============================================
 
-async function handleCourse(chatId, userId, courseCode) {
+async function handleCourse(
+  chatId,
+  userId,
+  courseCode
+) {
   const session = getSession(userId);
 
   if (!db.courses[courseCode]) return;
@@ -953,10 +1151,14 @@ async function handleCourse(chatId, userId, courseCode) {
 }
 
 // ============================================
-// FEATURE BUTTON HANDLER
+// HANDLE FEATURE
 // ============================================
 
-async function handleFeature(chatId, userId, feature) {
+async function handleFeature(
+  chatId,
+  userId,
+  feature
+) {
   const session = getSession(userId);
 
   if (!FEATURE_NAMES[feature]) return;
@@ -964,13 +1166,27 @@ async function handleFeature(chatId, userId, feature) {
   session.feature = feature;
   session.awaitingQuestion = false;
 
-  if (session.chapter) {
+  // Chapter selected hai to direct content generate hoga.
+
+  if (
+    session.course &&
+    session.semester &&
+    session.unit &&
+    session.chapter
+  ) {
     return generateForFeature(
       chatId,
       userId,
       feature
     );
   }
+
+  // Chapter selected nahi hai to course selection.
+
+  session.course = null;
+  session.semester = null;
+  session.unit = null;
+  session.chapter = null;
 
   return sendCourses(chatId, userId);
 }
@@ -980,144 +1196,32 @@ async function handleFeature(chatId, userId, feature) {
 // ============================================
 
 bot.on("message", async msg => {
+
   if (!msg.from || msg.from.is_bot) return;
 
   const chatId = msg.chat.id;
   const userId = msg.from.id;
+
   const session = getSession(userId);
 
   // ========================================
-  // PDF UPLOAD BY ADMIN
+  // PDF UPLOAD
   // ========================================
 
   if (msg.document) {
-    if (!isAdmin(userId)) {
-      return bot.sendMessage(
-        chatId,
-        "⛔ PDF upload sirf admin kar sakta hai."
-      );
-    }
-
-    const fileName = msg.document.file_name || "";
-
-    if (!fileName.toLowerCase().endsWith(".pdf")) {
-      return bot.sendMessage(
-        chatId,
-        "❌ Sirf PDF file upload karein."
-      );
-    }
-
-    const parts = (msg.caption || "")
-      .split("|")
-      .map(x => x.trim());
-
-    if (
-      parts.length < 4 ||
-      !db.courses[parts[0]]
-    ) {
-      return bot.sendMessage(
-        chatId,
-        "PDF ke saath caption likhein:\n\n" +
-        "bp|Semester 1|Unit 1|Chapter 1"
-      );
-    }
-
-    const [course, semester, unit, chapter] = parts;
-
-    try {
-      await bot.sendMessage(
-        chatId,
-        "⏳ PDF download aur process ho rahi hai..."
-      );
-
-      const fileLink = await bot.getFileLink(
-        msg.document.file_id
-      );
-
-      const response = await axios.get(
-        fileLink,
-        {
-          responseType: "arraybuffer",
-          timeout: 120000,
-          maxContentLength: 20 * 1024 * 1024
-        }
-      );
-
-      const parsed = await pdfParse(
-        Buffer.from(response.data)
-      );
-
-      const extractedText = (parsed.text || "").trim();
-
-      if (!extractedText) {
-        return bot.sendMessage(
-          chatId,
-          "❌ PDF mein readable text nahi mila.\n" +
-          "Scanned PDF ke liye OCR ki zaroorat hogi."
-        );
-      }
-
-      db.courses[course].semesters[semester] =
-        db.courses[course].semesters[semester] || {
-          units: {}
-        };
-
-      const semesterData =
-        db.courses[course].semesters[semester];
-
-      semesterData.units[unit] =
-        semesterData.units[unit] || {
-          chapters: {}
-        };
-
-      semesterData.units[unit].chapters[chapter] = {
-        text: extractedText,
-        updatedAt: new Date().toISOString()
-      };
-
-      saveDB();
-
-      return bot.sendMessage(
-        chatId,
-        "✅ <b>PDF successfully uploaded!</b>\n\n" +
-        "📚 Course: " + course + "\n" +
-        "📖 Semester: " + semester + "\n" +
-        "📘 Unit: " + unit + "\n" +
-        "📝 Chapter: " + chapter + "\n\n" +
-        "PDF content save ho gaya hai.\n" +
-        "Original PDF users ko nahi bheji jayegi.",
-        {
-          parse_mode: "HTML"
-        }
-      );
-
-    } catch (error) {
-      console.error(
-        "PDF ERROR:",
-        error.response?.data || error.message
-      );
-
-      return bot.sendMessage(
-        chatId,
-        "❌ PDF process nahi ho payi.\n" +
-        "Dobara try karein."
-      );
-    }
+    return handlePDF(msg);
   }
-
-  // ========================================
-  // IGNORE NON-TEXT MESSAGES
-  // ========================================
 
   if (!msg.text) return;
 
   const text = msg.text.trim();
 
-  // Commands are handled separately.
+  // Commands separately handled.
+
   if (text.startsWith("/")) return;
 
   // ========================================
-  // MAIN MENU BUTTON
+  // MAIN MENU
   // ========================================
 
   if (text === BUTTONS.home) {
@@ -1165,6 +1269,11 @@ bot.on("message", async msg => {
   }
 
   if (courseMap[text]) {
+
+    if (session.step !== "courses") {
+      return;
+    }
+
     return handleCourse(
       chatId,
       userId,
@@ -1173,13 +1282,15 @@ bot.on("message", async msg => {
   }
 
   // ========================================
-  // SEMESTER / LEVEL SELECTION
+  // SEMESTER SELECTION
   // ========================================
 
   if (session.step === "semesters") {
+
     const semesters = getSemesters(session.course);
 
     if (semesters.includes(text)) {
+
       session.semester = text;
       session.unit = null;
       session.chapter = null;
@@ -1193,12 +1304,14 @@ bot.on("message", async msg => {
   // ========================================
 
   if (session.step === "units") {
+
     const units = getUnits(
       session.course,
       session.semester
     );
 
     if (units.includes(text)) {
+
       session.unit = text;
       session.chapter = null;
 
@@ -1211,6 +1324,7 @@ bot.on("message", async msg => {
   // ========================================
 
   if (session.step === "chapters") {
+
     const chapters = getChapters(
       session.course,
       session.semester,
@@ -1218,8 +1332,19 @@ bot.on("message", async msg => {
     );
 
     if (chapters[text]) {
+
       session.chapter = text;
-      session.awaitingQuestion = false;
+      session.step = "study-options";
+
+      // Selected feature direct generate.
+
+      if (session.feature) {
+        return generateForFeature(
+          chatId,
+          userId,
+          session.feature
+        );
+      }
 
       return sendStudyOptions(chatId, userId);
     }
@@ -1229,19 +1354,25 @@ bot.on("message", async msg => {
   // AI FOLLOW-UP QUESTIONS
   // ========================================
 
-  if (session.awaitingQuestion && session.chapter) {
+  if (
+    session.awaitingQuestion &&
+    session.chapter
+  ) {
+
     const chapterData = getSelectedChapter(userId);
 
     if (!chapterData || !chapterData.text) {
+
       session.awaitingQuestion = false;
 
       return bot.sendMessage(
         chatId,
-        "❌ Chapter ka content nahi mila. Dobara chapter select karein."
+        "❌ Chapter content nahi mila."
       );
     }
 
     try {
+
       await bot.sendChatAction(
         chatId,
         "typing"
@@ -1252,15 +1383,20 @@ bot.on("message", async msg => {
         chapterData.text
       );
 
-      await sendLongMessage(chatId, answer);
+      await sendLongMessage(
+        chatId,
+        answer
+      );
 
       return bot.sendMessage(
         chatId,
-        "🤖 Isi chapter se aur question pooch sakte hain.\n" +
-        "Main Menu ke liye neeche button dabayein."
+
+        "🤖 Isi chapter se aur questions pooch sakte hain.\n\n" +
+        "🟩 Main Menu dabakar doosra option select karein."
       );
 
     } catch (error) {
+
       console.error(
         "AI QUESTION ERROR:",
         error.response?.data || error.message
@@ -1268,7 +1404,7 @@ bot.on("message", async msg => {
 
       return bot.sendMessage(
         chatId,
-        "❌ AI answer generate nahi ho paya. API key check karein."
+        "❌ AI answer generate nahi ho paya."
       );
     }
   }
@@ -1279,7 +1415,9 @@ bot.on("message", async msg => {
 
   return bot.sendMessage(
     chatId,
+
     "👇 Neeche diye gaye buttons mein se option select karein.",
+
     {
       reply_markup: {
         keyboard: mainKeyboard(),
@@ -1288,21 +1426,26 @@ bot.on("message", async msg => {
       }
     }
   );
+
 });
 
 // ============================================
 // START COMMAND
 // ============================================
 
-bot.onText(/^\/start(?:@\w+)?$/, msg => {
-  sendHome(
-    msg.chat.id,
-    msg.from.id
-  );
-});
+bot.onText(
+  /^\/start(?:@\w+)?$/,
+  async msg => {
+
+    return sendHome(
+      msg.chat.id,
+      msg.from.id
+    );
+  }
+);
 
 // ============================================
-// TELEGRAM COMMAND MENU
+// TELEGRAM MENU COMMANDS
 // ============================================
 
 bot.setMyCommands([
@@ -1312,23 +1455,23 @@ bot.setMyCommands([
   },
   {
     command: "structure",
-    description: "Admin: View Course Structure"
+    description: "View Course Structure"
   },
   {
     command: "addsemester",
-    description: "Admin: Add Semester or Level"
+    description: "Add Semester"
   },
   {
     command: "addunit",
-    description: "Admin: Add Unit"
+    description: "Add Unit"
   },
   {
     command: "addchapter",
-    description: "Admin: Add Chapter"
+    description: "Add Chapter"
   }
 ]).catch(error => {
   console.error(
-    "BOT COMMAND ERROR:",
+    "COMMAND ERROR:",
     error.message
   );
 });
@@ -1338,15 +1481,21 @@ bot.setMyCommands([
 // ============================================
 
 app.get("/", (req, res) => {
-  res.send("TATSAR STUDY BOT IS RUNNING");
+  res.send(
+    "TATSAR STUDY BOT IS RUNNING SUCCESSFULLY"
+  );
 });
 
 app.get("/health", (req, res) => {
   res.json({
     status: "online",
-    bot: "TATSAR Study Bot"
+    bot: "TATSAR STUDY BOT"
   });
 });
+
+// ============================================
+// SERVER START
+// ============================================
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(
@@ -1379,4 +1528,6 @@ process.on("uncaughtException", error => {
   );
 });
 
-console.log("TATSAR STUDY BOT STARTED");
+console.log(
+  "TATSAR STUDY BOT STARTED SUCCESSFULLY"
+);
