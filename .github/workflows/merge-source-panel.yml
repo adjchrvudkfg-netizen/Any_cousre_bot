@@ -1,0 +1,233 @@
+name: Merge Source + Panel Into APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_zip_url:
+        description: "Direct URL for extracted source ZIP (up to 1 GB)"
+        required: true
+        type: string
+      panel_zip_url:
+        description: "Direct URL for website panel ZIP (up to 1 GB)"
+        required: true
+        type: string
+      tag_name:
+        description: "Release tag name"
+        required: true
+        type: string
+
+jobs:
+  merge_and_build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y apktool zipalign apksigner unzip zip curl python3 openjdk-17-jdk-headless
+
+      - name: Prepare keystore
+        run: |
+          if [ -n "${{ secrets.KEYSTORE_BASE64 }}" ]; then
+            echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > release.keystore
+          else
+            keytool -genkeypair -v -keystore release.keystore -alias androiddebugkey \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass android -keypass android \
+              -dname "CN=PanelBuilder, OU=Dev, O=App, L=City, S=State, C=IN"
+          fi
+
+      - name: Merge source + panel and build APK
+        env:
+          MAX_BYTES: "1073741824"
+          KEYSTORE_PATH: ${{ github.workspace }}/release.keystore
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS || 'androiddebugkey' }}
+          KEY_PASS: ${{ secrets.KEY_PASS || 'android' }}
+        run: |
+          mkdir -p work out panel_raw source_raw apk_dir
+
+          # 1. Source ZIP aur Panel ZIP download (up to 1 GB each)
+          curl -fSL --max-filesize "$MAX_BYTES" "${{ inputs.source_zip_url }}" -o work/source.zip
+          curl -fSL --max-filesize "$MAX_BYTES" "${{ inputs.panel_zip_url }}" -o work/panel.zip
+
+          unzip -q work/source.zip -d source_raw
+          unzip -q work/panel.zip -d panel_raw
+
+          # 2. apktool_decoded folder locate karein (chahe poora source bundle ho ya direct decoded folder)
+          if [ -d "source_raw/apktool_decoded" ]; then
+            cp -r source_raw/apktool_decoded/. apk_dir/
+          elif [ -f "source_raw/AndroidManifest.xml" ]; then
+            cp -r source_raw/. apk_dir/
+          else
+            FOUND_MANIFEST=$(find source_raw -name "AndroidManifest.xml" | head -n 1 || true)
+            if [ -z "$FOUND_MANIFEST" ]; then
+              echo "Error: Source ZIP mein AndroidManifest.xml / apktool_decoded nahi mila." >&2
+              exit 1
+            fi
+            SRC_ROOT=$(dirname "$FOUND_MANIFEST")
+            cp -r "$SRC_ROOT"/. apk_dir/
+          fi
+
+          # 3. Website panel files ko assets/panel mein set up karein
+          mkdir -p apk_dir/assets/panel
+          P_SUB=$(find panel_raw -mindepth 1 -maxdepth 1 | wc -l)
+          P_FIRST=$(find panel_raw -mindepth 1 -maxdepth 1 | head -n 1 || true)
+          if [ "$P_SUB" -eq 1 ] && [ -d "$P_FIRST" ]; then
+            cp -r "$P_FIRST"/. apk_dir/assets/panel/
+          else
+            cp -r panel_raw/. apk_dir/assets/panel/
+          fi
+
+          # 4. Panel features ko APK ke saath connect karne ke liye bridge.js inject karein
+          cat > apk_dir/assets/panel/panel-bridge.js <<'EOF'
+          window.PanelBridge = {
+            isConnected: function () {
+              return typeof window.AndroidPanelHost !== "undefined";
+            },
+            notifyFeature: function (featureName, payload) {
+              if (window.AndroidPanelHost && window.AndroidPanelHost.onFeatureAction) {
+                return window.AndroidPanelHost.onFeatureAction(
+                  String(featureName || ""),
+                  JSON.stringify(payload || {})
+                );
+              }
+              return null;
+            },
+            getDeviceInfo: function () {
+              if (window.AndroidPanelHost && window.AndroidPanelHost.getDeviceInfo) {
+                return JSON.parse(window.AndroidPanelHost.getDeviceInfo());
+              }
+              return { connected: false };
+            }
+          };
+          EOF
+
+          # 5. Manifest permission + Launcher Activity Smali mein WebView + Bridge inject karein
+          python3 - <<'PYEOF'
+          import os, re, xml.etree.ElementTree as ET
+
+          apk_dir = "apk_dir"
+          manifest_path = os.path.join(apk_dir, "AndroidManifest.xml")
+          ET.register_namespace("android", "http://schemas.android.com/apk/res/android")
+          tree = ET.parse(manifest_path)
+          root = tree.getroot()
+          NS = "{http://schemas.android.com/apk/res/android}"
+
+          # INTERNET permission ensure karein
+          has_internet = any(
+              elem.attrib.get(NS + "name") == "android.permission.INTERNET"
+              for elem in root.findall("uses-permission")
+          )
+          if not has_internet:
+              perm = ET.Element("uses-permission", {NS + "name": "android.permission.INTERNET"})
+              root.insert(0, perm)
+
+          # Main Launcher Activity dhoondhein
+          launcher_activity = None
+          app_elem = root.find("application")
+          if app_elem is not None:
+              for act in app_elem.findall("activity"):
+                  for intent in act.findall("intent-filter"):
+                      actions = [a.attrib.get(NS + "name") for a in intent.findall("action")]
+                      cats = [c.attrib.get(NS + "name") for c in intent.findall("category")]
+                      if "android.intent.action.MAIN" in actions and "android.intent.category.LAUNCHER" in cats:
+                          launcher_activity = act.attrib.get(NS + "name")
+                          break
+                  if launcher_activity:
+                      break
+
+          tree.write(manifest_path, encoding="utf-8", xml_declaration=True)
+
+          # Smali bridge class add karein (WebView + JavascriptInterface)
+          bridge_smali_dir = os.path.join(apk_dir, "smali", "com", "panelbridge")
+          os.makedirs(bridge_smali_dir, exist_ok=True)
+          with open(os.path.join(bridge_smali_dir, "PanelHost.smali"), "w", encoding="utf-8") as f:
+              f.write(""".class public Lcom/panelbridge/PanelHost;
+          .super Ljava/lang/Object;
+
+          .field private activity:Landroid/app/Activity;
+
+          .method public constructor <init>(Landroid/app/Activity;)V
+              .locals 0
+              invoke-direct {p0}, Ljava/lang/Object;-><init>()V
+              iput-object p1, p0, Lcom/panelbridge/PanelHost;->activity:Landroid/app/Activity;
+              return-void
+          .end method
+
+          .method public onFeatureAction(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;
+              .locals 1
+              .annotation runtime Landroid/webkit/JavascriptInterface;
+              .end annotation
+              const-string v0, "OK"
+              return-object v0
+          .end method
+
+          .method public getDeviceInfo()Ljava/lang/String;
+              .locals 1
+              .annotation runtime Landroid/webkit/JavascriptInterface;
+              .end annotation
+              const-string v0, "{\\"connected\\":true,\\"platform\\":\\"android\\"}"
+              return-object v0
+          .end method
+          """)
+
+          # Launcher activity ke onCreate ke end mein WebView open karne ka hook lagayein
+          if launcher_activity:
+              rel_smali = launcher_activity.replace(".", os.sep) + ".smali"
+              for smali_root in sorted(os.listdir(apk_dir)):
+                  if smali_root.startswith("smali"):
+                      candidate = os.path.join(apk_dir, smali_root, rel_smali)
+                      if os.path.exists(candidate):
+                          with open(candidate, "r", encoding="utf-8") as sf:
+                              code = sf.read()
+                          hook = """
+              new-instance v0, Landroid/webkit/WebView;
+              invoke-direct {v0, p0}, Landroid/webkit/WebView;-><init>(Landroid/content/Context;)V
+              invoke-virtual {v0}, Landroid/webkit/WebView;->getSettings()Landroid/webkit/WebSettings;
+              move-result-object v1
+              const/4 v2, 0x1
+              invoke-virtual {v1, v2}, Landroid/webkit/WebSettings;->setJavaScriptEnabled(Z)V
+              invoke-virtual {v1, v2}, Landroid/webkit/WebSettings;->setDomStorageEnabled(Z)V
+              new-instance v2, Lcom/panelbridge/PanelHost;
+              invoke-direct {v2, p0}, Lcom/panelbridge/PanelHost;-><init>(Landroid/app/Activity;)V
+              const-string v3, "AndroidPanelHost"
+              invoke-virtual {v0, v2, v3}, Landroid/webkit/WebView;->addJavascriptInterface(Ljava/lang/Object;Ljava/lang/String;)V
+              const-string v2, "file:///android_asset/panel/index.html"
+              invoke-virtual {v0, v2}, Landroid/webkit/WebView;->loadUrl(Ljava/lang/String;)V
+              invoke-virtual {p0, v0}, Landroid/app/Activity;->setContentView(Landroid/view/View;)V
+          """
+                          if "PanelHost" not in code and ".method protected onCreate(" in code:
+                              idx = code.find(".method protected onCreate(")
+                              end_idx = code.find(".end method", idx)
+                              if end_idx != -1:
+                                  ret_pos = code.rfind("return-void", idx, end_idx)
+                                  if ret_pos != -1:
+                                      code = code[:ret_pos] + hook + "    " + code[ret_pos:]
+                                      with open(candidate, "w", encoding="utf-8") as sf:
+                                          sf.write(code)
+                          break
+          PYEOF
+
+          # 6. Repack, Align, Sign
+          apktool -Xmx2g b -f apk_dir -o work/unsigned.apk
+          zipalign -p -f 4 work/unsigned.apk work/aligned.apk
+          apksigner sign \
+            --ks "$KEYSTORE_PATH" \
+            --ks-key-alias "$KEY_ALIAS" \
+            --ks-pass "pass:$KEY_PASS" \
+            --key-pass "pass:$KEY_PASS" \
+            --out out/merged-panel-app.apk \
+            work/aligned.apk
+
+      - name: Upload merged APK to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag_name }}
+          files: out/merged-panel-app.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
