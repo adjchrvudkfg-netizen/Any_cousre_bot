@@ -15,7 +15,7 @@ const ADMIN_IDS = (process.env.ADMIN_IDS || "")
 
 const TELEGRAM_API = BOT_TOKEN ? `https://api.telegram.org/bot${BOT_TOKEN}` : "";
 const TELEGRAM_FILE_API = BOT_TOKEN ? `https://api.telegram.org/file/bot${BOT_TOKEN}` : "";
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
+const GEMINI_API_KEY = (process.env.GEMINI_API_KEY || "").trim();
 const GEMINI_MODEL = "gemini-2.5-flash";
 const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 
@@ -109,7 +109,6 @@ function escapeHtml(str = "") {
     .replace(/"/g, "&quot;");
 }
 
-// Blue / Green button helper (supports style if client accepts it + clean label)
 function makeBtn(text, callbackData, tone = "green") {
   const btn = { text, callback_data: callbackData };
   if (tone === "blue") {
@@ -194,35 +193,54 @@ async function askGemini(partsArray, useGoogleSearch = true, temperature = 0.35)
     return "⚠️ Server par GEMINI_API_KEY set nahi hai. Render Environment Variables mein GEMINI_API_KEY add karein.";
   }
 
-  const payload = {
-    contents: [
-      {
-        role: "user",
-        parts: partsArray
+  const runRequest = async (withSearch) => {
+    const payload = {
+      contents: [
+        {
+          role: "user",
+          parts: partsArray
+        }
+      ],
+      generationConfig: {
+        temperature,
+        maxOutputTokens: 4096
       }
-    ],
-    generationConfig: {
-      temperature,
-      maxOutputTokens: 4096
+    };
+
+    if (withSearch) {
+      payload.tools = [{ googleSearch: {} }];
     }
-  };
 
-  if (useGoogleSearch) {
-    payload.tools = [{ googleSearch: {} }];
-  }
-
-  try {
     const res = await axios.post(GEMINI_URL, payload, { timeout: 60000 });
     const candParts = res.data?.candidates?.[0]?.content?.parts || [];
-    const output = candParts.map((p) => p.text || "").join("\n").trim();
+    return candParts.map((p) => p.text || "").join("\n").trim();
+  };
+
+  try {
+    const output = await runRequest(useGoogleSearch);
     return output || "⚠️ Response generate nahi ho paya. Dobara try karein.";
   } catch (err) {
-    console.error("Gemini API Error:", err.response?.data || err.message);
+    const status = err.response?.status;
+    const errDetails = JSON.stringify(err.response?.data || err.message);
+    console.error("Gemini API Error:", status, errDetails);
+
+    if (useGoogleSearch) {
+      try {
+        const fallbackOutput = await runRequest(false);
+        if (fallbackOutput) return fallbackOutput;
+      } catch (err2) {
+        console.error(
+          "Gemini Fallback Error:",
+          err2.response?.status,
+          JSON.stringify(err2.response?.data || err2.message)
+        );
+      }
+    }
+
     return "⚠️ AI service temporarily unavailable hai. Thodi der baad try karein.";
   }
 }
 
-// Admin ke photo/image se saara text nikal kar structured notes banana (sirf text output)
 async function extractStructuredNotesFromImage(fileBuffer, mimeType, meta) {
   const base64Data = fileBuffer.toString("base64");
   const prompt = `Is image/photo mein jo bhi likha hua hai uska ek-ek word padh kar poora text structured notes mein badlo.
@@ -247,7 +265,6 @@ Rules:
     0.2
   );
 }
-// PYQ: Sirf pichhle saalon mein aaye hue asli questions
 async function generatePastPYQs(course, year, sem, subject, unit) {
   const prompt = `Google Search ka use karke sirf pichhle saalon (Previous Years) ke exam papers mein pehle se aaye hue asli questions (PYQs) nikalo. Naye banaya hua koi question mat add karna:
 
@@ -266,7 +283,6 @@ Har question ke saath uska short/clear exam answer bhi do.`;
   return askGemini([{ text: prompt }], true, 0.25);
 }
 
-// Mock Test: Har baar bilkul naye questions (Full Course vs Single Unit)
 async function generateFreshMockPaper(mode, course, year, sem, subject, unit) {
   const isFull = mode === "full";
   const nonce = `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
@@ -303,7 +319,6 @@ Answer key abhi mat likhna.`;
   return askGemini([{ text: prompt }], true, 0.75);
 }
 
-// AI Assistant: Jo pucha jaye uska jawab
 async function askAiAssistant(chatId, userQuestion, user) {
   if (!aiChatSessions[chatId]) aiChatSessions[chatId] = [];
   aiChatSessions[chatId].push(`Student: ${userQuestion}`);
@@ -321,7 +336,6 @@ async function askAiAssistant(chatId, userQuestion, user) {
   return reply;
 }
 
-// Links: Google se Admit Card aur Result ke links
 async function fetchOfficialLinks(course, year, sem) {
   const queryText = [course, year, sem].filter(Boolean).join(" ");
   const prompt = `Google Search ka use karke "${queryText || "university exam"}" ke Admit Card aur Result check karne ke official/authentic web links aur portal names dhundho.
@@ -330,6 +344,13 @@ Har link ke saath batayein ki wo kis kaam ke liye hai (Admit Card ya Result) aur
   return askGemini([{ text: prompt }], true, 0.2);
 }
 async function startMockTest(chatId, mode, course, year, sem, subject, unit) {
+  if (!GEMINI_API_KEY) {
+    return sendTelegramMessage(
+      chatId,
+      "⚠️ Server par <b>GEMINI_API_KEY</b> set nahi hai. Render Environment Variables mein <b>GEMINI_API_KEY</b> add karke service restart karein."
+    );
+  }
+
   if (activeTests[chatId]?.timer) {
     clearTimeout(activeTests[chatId].timer);
   }
@@ -779,7 +800,6 @@ async function handleAdminCommands(chatId, userId, text) {
     return sendTelegramMessage(chatId, `✅ Syllabus saved: <b>${escapeHtml(subjectName)} — ${escapeHtml(unitName)}</b>`), true;
   }
 
-  // Admin: Notes add karna (photo bhejkar OCR text save karne ke liye)
   if (text.startsWith("/add_note_photo ")) {
     const parts = text.replace("/add_note_photo ", "").split("|").map((s) => s.trim());
     if (parts.length < 6) {
@@ -796,7 +816,6 @@ async function handleAdminCommands(chatId, userId, text) {
     ), true;
   }
 
-  // Admin: Direct text notes add karna
   if (text.startsWith("/add_note ")) {
     const parts = text.replace("/add_note ", "").split("|").map((s) => s.trim());
     if (parts.length < 7) {
@@ -809,7 +828,6 @@ async function handleAdminCommands(chatId, userId, text) {
     return sendTelegramMessage(chatId, `✅ Notes saved: <b>${escapeHtml(subjectName)} — ${escapeHtml(unitName)}</b>`), true;
   }
 
-  // Admin: Notes hatana
   if (text.startsWith("/del_note ")) {
     const parts = text.replace("/del_note ", "").split("|").map((s) => s.trim());
     if (parts.length < 6) {
@@ -825,7 +843,6 @@ async function handleAdminCommands(chatId, userId, text) {
     return sendTelegramMessage(chatId, "⚠️ Ye notes nahi mile."), true;
   }
 
-  // Admin: Unit/Syllabus hatana
   if (text.startsWith("/del_unit ")) {
     const parts = text.replace("/del_unit ", "").split("|").map((s) => s.trim());
     if (parts.length < 6) {
