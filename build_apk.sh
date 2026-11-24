@@ -1,56 +1,75 @@
-#!/usr/bin/env bash
-set -euo pipefail
+name: Build Updated APK
 
-INPUT_APK="$1"
-WEBSITE_URL="$2"
-WEBSITE_ZIP="$3"
-OUTPUT_APK="$4"
+on:
+  workflow_dispatch:
+    inputs:
+      apk_url:
+        description: "Direct download URL for base .apk (up to 1 GB)"
+        required: true
+        type: string
+      website_url:
+        description: "Website URL (optional)"
+        required: false
+        type: string
+      website_zip_url:
+        description: "Direct download URL for website .zip (optional)"
+        required: false
+        type: string
+      tag_name:
+        description: "Release tag name"
+        required: true
+        type: string
 
-WORK_ROOT="$(dirname "$OUTPUT_APK")/workspace_$(date +%s)"
-DECOMPILED_DIR="$WORK_ROOT/decompiled"
-UNSIGNED_APK="$WORK_ROOT/repacked-unsigned.apk"
-ALIGNED_APK="$WORK_ROOT/aligned.apk"
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
-# Keystore config (apne environment variable ya default path se aayega)
-KEYSTORE_PATH="${KEYSTORE_PATH:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/debug.keystore}"
-KEY_ALIAS="${KEY_ALIAS:-androiddebugkey}"
-KEY_PASS="${KEY_PASS:-android}"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-mkdir -p "$WORK_ROOT"
+      - name: Install Android build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y apktool zipalign apksigner unzip curl openjdk-17-jdk-headless
 
-# 1. Base APK decode karein
-apktool d -f -o "$DECOMPILED_DIR" "$INPUT_APK"
+      - name: Prepare keystore
+        run: |
+          if [ -n "${{ secrets.KEYSTORE_BASE64 }}" ]; then
+            echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > release.keystore
+          else
+            keytool -genkeypair -v -keystore release.keystore -alias androiddebugkey \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass android -keypass android \
+              -dname "CN=Builder, OU=Dev, O=GitHub, L=City, S=State, C=IN"
+          fi
 
-# 2. Web assets / config folder taiyar karein
-WEB_TARGET_DIR="$DECOMPILED_DIR/assets/web_bundle"
-mkdir -p "$WEB_TARGET_DIR"
+      - name: Download inputs (up to 1 GB each) and build APK
+        env:
+          KEYSTORE_PATH: ${{ github.workspace }}/release.keystore
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS || 'androiddebugkey' }}
+          KEY_PASS: ${{ secrets.KEY_PASS || 'android' }}
+          MAX_BYTES: "1073741824"
+        run: |
+          mkdir -p work out
 
-if [ -n "$WEBSITE_ZIP" ] && [ -f "$WEBSITE_ZIP" ]; then
-  unzip -o "$WEBSITE_ZIP" -d "$WEB_TARGET_DIR" >/dev/null
-fi
+          curl -fSL --max-filesize "$MAX_BYTES" "${{ inputs.apk_url }}" -o work/input.apk
 
-if [ -n "$WEBSITE_URL" ]; then
-  cat > "$WEB_TARGET_DIR/web_config.json" <<EOF
-{
-  "websiteUrl": "$WEBSITE_URL",
-  "updatedAt": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-}
-EOF
-fi
+          ZIP_PATH=""
+          if [ -n "${{ inputs.website_zip_url }}" ]; then
+            curl -fSL --max-filesize "$MAX_BYTES" "${{ inputs.website_zip_url }}" -o work/website.zip
+            ZIP_PATH="work/website.zip"
+          fi
 
-# 3. APK ko wapas build karein
-apktool b -o "$UNSIGNED_APK" "$DECOMPILED_DIR"
+          chmod +x build_apk.sh
+          ./build_apk.sh "work/input.apk" "${{ inputs.website_url }}" "$ZIP_PATH" "out/updated-app.apk"
 
-# 4. zipalign + apksigner se sign karein
-zipalign -p -f 4 "$UNSIGNED_APK" "$ALIGNED_APK"
-
-apksigner sign \
-  --ks "$KEYSTORE_PATH" \
-  --ks-key-pass "pass:$KEY_PASS" \
-  --key-pass "pass:$KEY_PASS" \
-  --ks-alias "$KEY_ALIAS" \
-  --out "$OUTPUT_APK" \
-  "$ALIGNED_APK"
-
-# 5. Temp build folder saaf karein
-rm -rf "$WORK_ROOT"
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag_name }}
+          files: out/updated-app.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
