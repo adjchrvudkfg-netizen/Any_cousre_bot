@@ -1,20 +1,23 @@
-const fs = require("fs");
 const path = require("path");
 const http = require("http");
-const { execFile } = require("child_process");
 const { Telegraf } = require("telegraf");
 
 const BOT_TOKEN = (process.env.BOT_TOKEN || "").trim();
 const PORT = process.env.PORT || 3000;
-const WORK_DIR = path.join(__dirname, "builds");
-const BUILD_SCRIPT = path.join(__dirname, "build_apk.sh");
+const MAX_FILE_BYTES = 1024 * 1024 * 1024; // 1 GB
+
+const GITHUB_OWNER = (process.env.GITHUB_OWNER || "").trim();
+const GITHUB_REPO = (process.env.GITHUB_REPO || "").trim();
+const GITHUB_TOKEN = (process.env.GITHUB_TOKEN || "").trim();
+const WORKFLOW_FILE = (process.env.WORKFLOW_FILE || "build-apk.yml").trim();
+const GITHUB_BRANCH = (process.env.GITHUB_BRANCH || "main").trim();
 
 if (!BOT_TOKEN) {
   console.error("Error: BOT_TOKEN environment variable missing ya empty hai.");
   process.exit(1);
 }
 
-// Render Web Service health check ke liye lightweight HTTP server
+// Render Web Service health check ke liye HTTP server
 http
   .createServer((req, res) => {
     res.writeHead(200, { "Content-Type": "text/plain" });
@@ -25,6 +28,8 @@ http
   });
 
 const bot = new Telegraf(BOT_TOKEN);
+
+// userId -> { apkUrl?: string, websiteZipUrl?: string, websiteUrl?: string }
 const sessions = new Map();
 
 function getSession(userId) {
@@ -34,184 +39,198 @@ function getSession(userId) {
   return sessions.get(userId);
 }
 
-function runBuildScript(scriptPath, args) {
-  return new Promise((resolve, reject) => {
-    execFile(
-      "bash",
-      [scriptPath, ...args],
-      { maxBuffer: 1024 * 1024 * 50 },
-      (err, stdout, stderr) => {
-        if (err) {
-          return reject(new Error((stderr || stdout || err.message).trim()));
-        }
-        resolve(stdout.trim());
-      }
-    );
-  });
+function isHttpUrl(str) {
+  try {
+    const u = new URL(str);
+    return u.protocol === "http:" || u.protocol === "https:";
+  } catch {
+    return false;
+  }
 }
 
-async function downloadTelegramFile(ctx, fileId, destPath) {
-  const fileLink = await ctx.telegram.getFileLink(fileId);
-  const response = await fetch(fileLink.href);
-  if (!response.ok) {
-    throw new Error(`File download failed: HTTP ${response.status}`);
+async function checkRemoteFileSize(url) {
+  try {
+    const res = await fetch(url, { method: "HEAD", redirect: "follow" });
+    if (!res.ok) return null;
+    const len = Number(res.headers.get("content-length") || 0);
+    return Number.isFinite(len) && len > 0 ? len : null;
+  } catch {
+    return null;
   }
-  const arrayBuffer = await response.arrayBuffer();
-  fs.writeFileSync(destPath, Buffer.from(arrayBuffer));
+}
+
+function formatMB(bytes) {
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+async function triggerGitHubBuild({ apkUrl, websiteUrl, websiteZipUrl, tagName }) {
+  if (!GITHUB_OWNER || !GITHUB_REPO || !GITHUB_TOKEN) {
+    throw new Error("GITHUB_OWNER, GITHUB_REPO, ya GITHUB_TOKEN env missing hai.");
+  }
+
+  const url = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/actions/workflows/${WORKFLOW_FILE}/dispatches`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${GITHUB_TOKEN}`,
+      Accept: "application/vnd.github+json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      ref: GITHUB_BRANCH,
+      inputs: {
+        apk_url: apkUrl || "",
+        website_url: websiteUrl || "",
+        website_zip_url: websiteZipUrl || "",
+        tag_name: tagName,
+      },
+    }),
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new Error(`GitHub Actions dispatch fail (${res.status}): ${errText}`);
+  }
 }
 
 bot.start(async (ctx) => {
   sessions.set(ctx.from.id, {});
   await ctx.reply(
     [
-      "APK + Website Builder Bot Ready hai.",
+      "APK + Website Builder Bot (1 GB Support) Ready hai.",
       "",
       "Kaise use karein:",
-      "1. Apni base .apk file bhejein (Document ke roop mein).",
-      "2. Website .zip bhejein ya website URL (https://...) likhein.",
-      "3. /status se current files/URL check karein.",
-      "4. /build likh kar updated signed .apk banayein.",
-      "5. /reset se naya session shuru karein.",
+      "1. Base .apk ka direct download link (https://.../.apk) bhejein (1 GB tak).",
+      "2. Website .zip ka direct link (https://.../.zip), chhoti .zip file, ya website URL bhejein.",
+      "3. /status se current inputs check karein.",
+      "4. /build likh kar GitHub Actions se APK build start karein.",
+      "5. /reset se session clear karein.",
     ].join("\n")
   );
 });
 
 bot.command("reset", async (ctx) => {
-  const userId = ctx.from.id;
-  const userDir = path.join(WORK_DIR, String(userId));
-  fs.rmSync(userDir, { recursive: true, force: true });
-  sessions.set(userId, {});
-  await ctx.reply("Session aur purani build files clear ho gayin. Nayi APK aur website bhejein.");
+  sessions.set(ctx.from.id, {});
+  await ctx.reply("Session reset ho gaya. Naya APK link aur website link/URL bhejein.");
 });
 
 bot.command("status", async (ctx) => {
-  const session = getSession(ctx.from.id);
+  const s = getSession(ctx.from.id);
   await ctx.reply(
     [
       "Current Session Status:",
-      `• Base APK: ${session.apkPath ? "Uploaded" : "Pending"}`,
-      `• Website ZIP: ${session.zipPath ? "Uploaded" : "Not provided"}`,
-      `• Website URL: ${session.websiteUrl || "Not provided"}`,
+      `• APK URL: ${s.apkUrl || "Pending"}`,
+      `• Website ZIP URL: ${s.websiteZipUrl || "Not provided"}`,
+      `• Website URL: ${s.websiteUrl || "Not provided"}`,
     ].join("\n")
   );
 });
 
+// Chhoti .zip files ke liye Telegram document support (20 MB limit tak)
 bot.on("document", async (ctx) => {
   const doc = ctx.message.document;
-  const userId = ctx.from.id;
-  const session = getSession(userId);
-  const userDir = path.join(WORK_DIR, String(userId));
-  fs.mkdirSync(userDir, { recursive: true });
-
   const fileName = (doc.file_name || "").toLowerCase();
-  const statusMsg = await ctx.reply("File download ho rahi hai...");
+
+  if ((doc.file_size || 0) > 20 * 1024 * 1024) {
+    return ctx.reply(
+      "Telegram bot 20 MB se badi file direct download nahi kar sakta[span_1](start_span)[span_1](end_span). Kripya 1 GB tak ki file ka direct https:// download link bhejein."
+    );
+  }
+
+  if (!fileName.endsWith(".zip")) {
+    return ctx.reply(
+      "Badi .apk file ka direct https:// link bhejein, ya chhoti .zip file bhejein."
+    );
+  }
 
   try {
-    if (fileName.endsWith(".apk")) {
-      const apkPath = path.join(userDir, "input.apk");
-      await downloadTelegramFile(ctx, doc.file_id, apkPath);
-      session.apkPath = apkPath;
-      await ctx.telegram.editMessageText(
-        ctx.chat.id,
-        statusMsg.message_id,
-        null,
-        "Base APK save ho gayi. Ab website .zip ya website URL bhejein."
-      );
-      return;
-    }
-
-    if (fileName.endsWith(".zip")) {
-      const zipPath = path.join(userDir, "website.zip");
-      await downloadTelegramFile(ctx, doc.file_id, zipPath);
-      session.zipPath = zipPath;
-      await ctx.telegram.editMessageText(
-        ctx.chat.id,
-        statusMsg.message_id,
-        null,
-        "Website ZIP save ho gayi. Ab /build likhein (agar APK bhi bhej chuke hain)."
-      );
-      return;
-    }
-
-    await ctx.telegram.editMessageText(
-      ctx.chat.id,
-      statusMsg.message_id,
-      null,
-      "Sirf .apk ya .zip file bhejein."
-    );
+    const fileLink = await ctx.telegram.getFileLink(doc.file_id);
+    const s = getSession(ctx.from.id);
+    s.websiteZipUrl = fileLink.href;
+    await ctx.reply("Website ZIP link session mein save ho gaya. Ab /build likhein.");
   } catch (err) {
-    await ctx.telegram.editMessageText(
-      ctx.chat.id,
-      statusMsg.message_id,
-      null,
-      `Download error: ${err.message}`
-    );
+    await ctx.reply(`ZIP link error: ${err.message}`);
   }
 });
 
+// Direct URLs (APK link, Website ZIP link, ya Website URL)
 bot.on("text", async (ctx) => {
   const text = ctx.message.text.trim();
   if (!text || text.startsWith("/")) return;
 
-  const session = getSession(ctx.from.id);
-  if (/^https?:\/\/\S+$/i.test(text)) {
-    session.websiteUrl = text;
-    await ctx.reply(`Website URL save ho gaya:\n${text}\n\nAb /build command bhejein.`);
-    return;
+  if (!isHttpUrl(text)) {
+    return ctx.reply("Kripya valid https:// URL bhejein ya /build likhein.");
   }
 
-  await ctx.reply("Kripya valid website URL (https://...) bhejein ya /build likhein.");
+  const s = getSession(ctx.from.id);
+  const lower = text.toLowerCase();
+
+  const sizeBytes = await checkRemoteFileSize(text);
+  if (sizeBytes !== null && sizeBytes > MAX_FILE_BYTES) {
+    return ctx.reply(
+      `File size ${formatMB(sizeBytes)} hai, jo 1024 MB (1 GB) limit se zyada hai.`
+    );
+  }
+
+  if (lower.includes(".apk")) {
+    s.apkUrl = text;
+    const sizeText = sizeBytes ? ` (${formatMB(sizeBytes)})` : "";
+    return ctx.reply(
+      `Base APK URL save ho gaya${sizeText}.\nAb Website URL ya Website ZIP link bhejein, phir /build likhein.`
+    );
+  }
+
+  if (lower.includes(".zip")) {
+    s.websiteZipUrl = text;
+    const sizeText = sizeBytes ? ` (${formatMB(sizeBytes)})` : "";
+    return ctx.reply(
+      `Website ZIP URL save ho gaya${sizeText}.\nAb /build likhein.`
+    );
+  }
+
+  s.websiteUrl = text;
+  return ctx.reply(
+    `Website URL save ho gaya:\n${text}\n\nAb /build likhein (agar APK URL bhi save kar chuke hain).`
+  );
 });
 
 bot.command("build", async (ctx) => {
-  const userId = ctx.from.id;
-  const session = getSession(userId);
+  const s = getSession(ctx.from.id);
 
-  if (!session.apkPath || !fs.existsSync(session.apkPath)) {
-    return ctx.reply("Pehle base .apk file bhejein.");
+  if (!s.apkUrl) {
+    return ctx.reply("Pehle base .apk ka direct https:// link bhejein.");
   }
-  if (!session.zipPath && !session.websiteUrl) {
-    return ctx.reply("Pehle website .zip file ya website URL bhejein.");
-  }
-
-  const userDir = path.join(WORK_DIR, String(userId));
-  const outputApk = path.join(userDir, "final-signed.apk");
-
-  if (fs.existsSync(outputApk)) {
-    fs.unlinkSync(outputApk);
+  if (!s.websiteUrl && !s.websiteZipUrl) {
+    return ctx.reply("Pehle Website URL ya Website ZIP link/file bhejein.");
   }
 
-  const statusMsg = await ctx.reply("APK repack aur sign ho rahi hai... Thoda wait karein.");
+  const tagName = `build-${ctx.from.id}-${Date.now()}`;
+  const statusMsg = await ctx.reply("GitHub Actions workflow trigger ho raha hai...");
 
   try {
-    await runBuildScript(BUILD_SCRIPT, [
-      session.apkPath,
-      session.websiteUrl || "",
-      session.zipPath || "",
-      outputApk,
-    ]);
-
-    if (!fs.existsSync(outputApk)) {
-      throw new Error("Final APK file nahi bani.");
-    }
+    await triggerGitHubBuild({
+      apkUrl: s.apkUrl,
+      websiteUrl: s.websiteUrl || "",
+      websiteZipUrl: s.websiteZipUrl || "",
+      tagName,
+    });
 
     await ctx.telegram.editMessageText(
       ctx.chat.id,
       statusMsg.message_id,
       null,
-      "Build complete! Updated APK bhej raha hoon..."
+      [
+        "Build workflow start ho gaya hai!",
+        `Tag: ${tagName}`,
+        "GitHub repository ke Actions / Releases tab mein progress aur final APK dekhein.",
+      ].join("\n")
     );
-
-    await ctx.replyWithDocument({
-      source: outputApk,
-      filename: "updated-app.apk",
-    });
   } catch (err) {
     await ctx.telegram.editMessageText(
       ctx.chat.id,
       statusMsg.message_id,
       null,
-      `Build fail hua:\n${err.message}`
+      `Build trigger fail hua:\n${err.message}`
     );
   }
 });
@@ -219,7 +238,7 @@ bot.command("build", async (ctx) => {
 bot
   .launch()
   .then(() => {
-    console.log("Telegram bot chal raha hai...");
+    console.log("Telegram bot (1 GB URL mode) chal raha hai...");
   })
   .catch((err) => {
     console.error("Bot launch error:", err);
