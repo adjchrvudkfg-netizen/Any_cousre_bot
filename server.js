@@ -14,12 +14,15 @@ const ADMIN_IDS = (process.env.ADMIN_IDS || "")
   .filter(Boolean);
 
 const TELEGRAM_API = BOT_TOKEN ? `https://api.telegram.org/bot${BOT_TOKEN}` : "";
+const TELEGRAM_FILE_API = BOT_TOKEN ? `https://api.telegram.org/file/bot${BOT_TOKEN}` : "";
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+const GEMINI_MODEL = "gemini-2.5-flash";
+const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 
 const DB_FILE = path.join(__dirname, "study_material_db.json");
 const activeTests = {};
-const pendingInputs = {};
+const aiChatSessions = {};
+const pendingNotesUpload = {};
 const DEFAULT_CATEGORIES = {
   Pharmacy: ["B.Pharma", "D.Pharma"],
   Engineering: ["B.Tech", "Diploma"],
@@ -60,8 +63,7 @@ let db = {
   customYears: JSON.parse(JSON.stringify(DEFAULT_YEARS)),
   customSemesters: JSON.parse(JSON.stringify(DEFAULT_SEMESTERS)),
   topics: {},
-  materials: {},
-  uploadedPdfs: [],
+  handwrittenNotes: {},
   users: {}
 };
 
@@ -69,12 +71,13 @@ function loadDb() {
   try {
     if (fs.existsSync(DB_FILE)) {
       const raw = JSON.parse(fs.readFileSync(DB_FILE, "utf8"));
-      db.categories = raw.categories && Object.keys(raw.categories).length ? raw.categories : JSON.parse(JSON.stringify(DEFAULT_CATEGORIES));
+      db.categories = raw.categories && Object.keys(raw.categories).length
+        ? raw.categories
+        : JSON.parse(JSON.stringify(DEFAULT_CATEGORIES));
       db.customYears = raw.customYears || JSON.parse(JSON.stringify(DEFAULT_YEARS));
       db.customSemesters = raw.customSemesters || JSON.parse(JSON.stringify(DEFAULT_SEMESTERS));
       db.topics = raw.topics || {};
-      db.materials = raw.materials || {};
-      db.uploadedPdfs = Array.isArray(raw.uploadedPdfs) ? raw.uploadedPdfs : [];
+      db.handwrittenNotes = raw.handwrittenNotes || {};
       db.users = raw.users || {};
     } else {
       persistAll();
@@ -106,6 +109,17 @@ function escapeHtml(str = "") {
     .replace(/"/g, "&quot;");
 }
 
+// Blue / Green button helper (supports style if client accepts it + clean label)
+function makeBtn(text, callbackData, tone = "green") {
+  const btn = { text, callback_data: callbackData };
+  if (tone === "blue") {
+    btn.style = "primary";
+  } else if (tone === "green") {
+    btn.style = "success";
+  }
+  return btn;
+}
+
 function getUser(chatId) {
   const key = String(chatId);
   if (!db.users[key]) {
@@ -116,7 +130,7 @@ function getUser(chatId) {
       selectedSemester: null,
       selectedSubject: null,
       selectedUnit: null,
-      selectedMode: null,
+      selectedFeature: null,
       lastMessageId: null
     };
   }
@@ -132,13 +146,11 @@ function getCoursesForCategory(catName) {
 }
 
 function getYearsForCourse(catName, courseName) {
-  const key = `${catName}|${courseName}`;
-  return db.customYears[key] || ["1st Year", "2nd Year"];
+  return db.customYears[`${catName}|${courseName}`] || ["1st Year", "2nd Year"];
 }
 
 function getSemestersForYear(catName, courseName, yearName) {
-  const key = `${catName}|${courseName}|${yearName}`;
-  return db.customSemesters[key] || ["Semester 1", "Semester 2"];
+  return db.customSemesters[`${catName}|${courseName}|${yearName}`] || ["Semester 1", "Semester 2"];
 }
 
 async function sendTelegramMessage(chatId, text, extra = {}) {
@@ -177,7 +189,7 @@ async function sendLongMessage(chatId, text, extra = {}) {
     await sendTelegramMessage(chatId, chunk, isLast ? extra : {});
   }
 }
-async function askGemini(promptText, useGoogleSearch = true) {
+async function askGemini(partsArray, useGoogleSearch = true, temperature = 0.35) {
   if (!GEMINI_API_KEY) {
     return "⚠️ Server par GEMINI_API_KEY set nahi hai. Render Environment Variables mein GEMINI_API_KEY add karein.";
   }
@@ -186,11 +198,11 @@ async function askGemini(promptText, useGoogleSearch = true) {
     contents: [
       {
         role: "user",
-        parts: [{ text: promptText }]
+        parts: partsArray
       }
     ],
     generationConfig: {
-      temperature: 0.4,
+      temperature,
       maxOutputTokens: 4096
     }
   };
@@ -201,8 +213,8 @@ async function askGemini(promptText, useGoogleSearch = true) {
 
   try {
     const res = await axios.post(GEMINI_URL, payload, { timeout: 60000 });
-    const parts = res.data?.candidates?.[0]?.content?.parts || [];
-    const output = parts.map((p) => p.text || "").join("\n").trim();
+    const candParts = res.data?.candidates?.[0]?.content?.parts || [];
+    const output = candParts.map((p) => p.text || "").join("\n").trim();
     return output || "⚠️ Response generate nahi ho paya. Dobara try karein.";
   } catch (err) {
     console.error("Gemini API Error:", err.response?.data || err.message);
@@ -210,41 +222,34 @@ async function askGemini(promptText, useGoogleSearch = true) {
   }
 }
 
-async function generateDetailedNotes(course, year, sem, subject, unit) {
-  const cacheKey = `SCRIBD_NOTES::${course}::${year}::${sem}::${subject}::${unit}`;
-  if (db.materials[cacheKey]) {
-    return db.materials[cacheKey];
-  }
+// Admin ke photo/image se saara text nikal kar structured notes banana (sirf text output)
+async function extractStructuredNotesFromImage(fileBuffer, mimeType, meta) {
+  const base64Data = fileBuffer.toString("base64");
+  const prompt = `Is image/photo mein jo bhi likha hua hai uska ek-ek word padh kar poora text structured notes mein badlo.
+Course: ${meta.course} | Year: ${meta.year} | Semester: ${meta.sem} | Subject: ${meta.subject} | Unit: ${meta.unit}
 
-  const prompt = `Google Search ka upyog karke PCI (Pharmacy Council of India) syllabus aur Scribd / pharmacy study resources ke mutabik niche diye gaye topic ke complete, detailed exam notes banao:
+Strict Format Rules (sirf isi format mein likho):
+${meta.unit} - ${meta.subject}
 
-Course: ${course}
-Year: ${year}
-Semester: ${sem}
-Subject: ${subject}
-Unit: ${unit}
+Main Heading
+Heading - Definition (agar definition hai to definition likho, warna clear points likho)
 
-Niyam:
-1. Har topic aur sub-topic ko poori detail mein samjhao (definition, classification, mechanism/principle/structure, advantages/disadvantages, aur pharmaceutical importance/uses).
-2. Notes bilkul structured aur exam-ready hon jaise student full marks ke liye likhta hai.
-3. Aakhir mein "Important Exam Questions (2M, 5M, 10M)" bhi do.
-4. Markdown table ya raw HTML tags mat lagao; saaf plain text aur headings/bullets use karo.`;
+Rules:
+- Photo mein jitna bhi matter/text likha hai usme se kuch bhi miss mat karo.
+- Koi image ya link mat do, sirf clean text notes do.`;
 
-  const text = await askGemini(prompt, true);
-  if (!text.startsWith("⚠️")) {
-    db.materials[cacheKey] = text;
-    persistAll();
-  }
-  return text;
+  return askGemini(
+    [
+      { inlineData: { mimeType: mimeType || "image/jpeg", data: base64Data } },
+      { text: prompt }
+    ],
+    false,
+    0.2
+  );
 }
-
-async function generatePYQs(course, year, sem, subject, unit) {
-  const cacheKey = `PYQ::${course}::${year}::${sem}::${subject}::${unit}`;
-  if (db.materials[cacheKey]) {
-    return db.materials[cacheKey];
-  }
-
-  const prompt = `Google Search ka use karke PCI (Pharmacy Council of India) ke syllabus ke anusaar pichhle saalon (Previous Years) mein aaye hue sabhi important exam questions (PYQs) nikalo:
+// PYQ: Sirf pichhle saalon mein aaye hue asli questions
+async function generatePastPYQs(course, year, sem, subject, unit) {
+  const prompt = `Google Search ka use karke sirf pichhle saalon (Previous Years) ke exam papers mein pehle se aaye hue asli questions (PYQs) nikalo. Naye banaya hua koi question mat add karna:
 
 Course: ${course}
 Year: ${year}
@@ -253,17 +258,76 @@ Subject: ${subject}
 Unit: ${unit}
 
 Format:
-- Short / Very Short Questions (2 Marks)
-- Medium / Short Answer Questions (5 Marks — jahan sambhav ho wahan frequency/year mention karo)
-- Long Answer Questions (10 Marks)
-Sirf genuine aur syllabus-relevant questions do.`;
+1. 2 Marks Questions (Previous Year Asked)
+2. 5 Marks Questions (Previous Year Asked — saal/frequency agar mile to likho)
+3. 10 Marks Long Questions (Previous Year Asked)
+Har question ke saath uska short/clear exam answer bhi do.`;
 
-  const text = await askGemini(prompt, true);
-  if (!text.startsWith("⚠️")) {
-    db.materials[cacheKey] = text;
-    persistAll();
+  return askGemini([{ text: prompt }], true, 0.25);
+}
+
+// Mock Test: Har baar bilkul naye questions (Full Course vs Single Unit)
+async function generateFreshMockPaper(mode, course, year, sem, subject, unit) {
+  const isFull = mode === "full";
+  const nonce = `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+
+  const prompt = isFull
+    ? `Tum ek exam paper setter ho. Seed [${nonce}] ke basis par FULL SYLLABUS ke liye bilkul NAYE questions ka Mock Test Paper banao (pichhle test se repeat mat karna):
+
+Course: ${course}
+Year: ${year}
+Semester: ${sem}
+Subject: ${subject}
+Total Marks: 75 | Time Allowed: 3 Hours (180 Minutes)
+
+- Section A: 10 MCQs (2 Marks each = 20 Marks) from all units with options A, B, C, D.
+- Section B: 3 Long Questions (Attempt any 2, 10 Marks each = 20 Marks).
+- Section C: 9 Short Questions (Attempt any 7, 5 Marks each = 35 Marks).
+
+Answer key abhi mat likhna.`
+    : `Tum ek exam paper setter ho. Seed [${nonce}] ke basis par ONLY ONE UNIT ke liye bilkul NAYE questions ka Mock Test Paper banao:
+
+Course: ${course}
+Year: ${year}
+Semester: ${sem}
+Subject: ${subject}
+Unit: ${unit}
+Total Marks: 30 | Time Allowed: 1 Hour (60 Minutes)
+
+- Section A: 5 MCQs (1 Mark each = 5 Marks) from ${unit} with options A, B, C, D.
+- Section B: 2 Long Questions (Attempt any 1, 10 Marks).
+- Section C: 4 Short Questions (Attempt any 3, 5 Marks each = 15 Marks).
+
+Answer key abhi mat likhna.`;
+
+  return askGemini([{ text: prompt }], true, 0.75);
+}
+
+// AI Assistant: Jo pucha jaye uska jawab
+async function askAiAssistant(chatId, userQuestion, user) {
+  if (!aiChatSessions[chatId]) aiChatSessions[chatId] = [];
+  aiChatSessions[chatId].push(`Student: ${userQuestion}`);
+  if (aiChatSessions[chatId].length > 8) {
+    aiChatSessions[chatId] = aiChatSessions[chatId].slice(-8);
   }
-  return text;
+
+  const contextStr = user.selectedCourse
+    ? `Context: ${user.selectedCourse} | ${user.selectedYear || ""} | ${user.selectedSemester || ""} | ${user.selectedSubject || ""}\n`
+    : "";
+
+  const prompt = `${contextStr}A student is asking a question in a study bot. Give a clear, accurate, and helpful answer:\n\n${aiChatSessions[chatId].join("\n")}`;
+  const reply = await askGemini([{ text: prompt }], true, 0.4);
+  aiChatSessions[chatId].push(`Assistant: ${reply}`);
+  return reply;
+}
+
+// Links: Google se Admit Card aur Result ke links
+async function fetchOfficialLinks(course, year, sem) {
+  const queryText = [course, year, sem].filter(Boolean).join(" ");
+  const prompt = `Google Search ka use karke "${queryText || "university exam"}" ke Admit Card aur Result check karne ke official/authentic web links aur portal names dhundho.
+Har link ke saath batayein ki wo kis kaam ke liye hai (Admit Card ya Result) aur students use kaise check kar sakte hain.`;
+
+  return askGemini([{ text: prompt }], true, 0.2);
 }
 async function startMockTest(chatId, mode, course, year, sem, subject, unit) {
   if (activeTests[chatId]?.timer) {
@@ -277,43 +341,13 @@ async function startMockTest(chatId, mode, course, year, sem, subject, unit) {
 
   await sendTelegramMessage(
     chatId,
-    `⏳ <b>Mock Test Taiyar Ho Raha Hai...</b>\n` +
+    `🎯 <b>Mock Test Ban Raha Hai...</b>\n` +
       `📘 <b>Subject:</b> ${escapeHtml(subject)}\n` +
-      `📚 <b>Mode:</b> ${escapeHtml(scopeLabel)}\n` +
-      `📝 <b>Pattern:</b> ${totalMarks} Marks | ⏱️ ${durationMinutes} Minutes\n\n` +
-      `PCI syllabus se naye questions ban rahe hain...`
+      `📚 <b>Scope:</b> ${escapeHtml(scopeLabel)}\n` +
+      `📝 <b>Marks:</b> ${totalMarks} | ⏱️ <b>Time:</b> ${durationMinutes} Minutes`
   );
 
-  const prompt = isFull
-    ? `PCI (Pharmacy Council of India) university exam pattern ke hisaab se ek bilkul naya FULL SYLLABUS Mock Test Paper banao:
-Course: ${course}
-Year: ${year}
-Semester: ${sem}
-Subject: ${subject}
-Total Marks: 75 | Time Allowed: 3 Hours (180 Minutes)
-
-Paper Structure:
-- Section A: 10 Multiple Choice Questions (2 Marks each = 20 Marks) from across the full syllabus with options (A, B, C, D).
-- Section B: 3 Long Answer Questions (Attempt any 2, 10 Marks each = 20 Marks).
-- Section C: 9 Short Answer Questions (Attempt any 7, 5 Marks each = 35 Marks).
-
-Bilkul real exam question paper jaisa likho. Answer key abhi mat dena.`
-    : `PCI syllabus ke hisaab se sirf ek unit ka Sessional Mock Test Paper banao:
-Course: ${course}
-Year: ${year}
-Semester: ${sem}
-Subject: ${subject}
-Unit: ${unit}
-Total Marks: 30 | Time Allowed: 1 Hour (60 Minutes)
-
-Paper Structure:
-- Section A: 5 Multiple Choice Questions (1 Mark each = 5 Marks) from this unit with options (A, B, C, D).
-- Section B: 2 Long Answer Questions (Attempt any 1, 10 Marks).
-- Section C: 4 Short Answer Questions (Attempt any 3, 5 Marks each = 15 Marks).
-
-Bilkul exam question paper jaisa likho. Answer key abhi mat dena.`;
-
-  const paper = await askGemini(prompt, true);
+  const paper = await generateFreshMockPaper(mode, course, year, sem, subject, unit);
   const endTime = Date.now() + durationMinutes * 60 * 1000;
 
   const timer = setTimeout(async () => {
@@ -329,7 +363,7 @@ Bilkul exam question paper jaisa likho. Answer key abhi mat dena.`;
     year,
     sem,
     subject,
-    unit: isFull ? "Full Syllabus" : unit,
+    unit: isFull ? "Full Course" : unit,
     totalMarks,
     durationMinutes,
     endTime,
@@ -338,16 +372,16 @@ Bilkul exam question paper jaisa likho. Answer key abhi mat dena.`;
 
   await sendLongMessage(
     chatId,
-    `📝 <b>MOCK TEST SHURU!</b>\n` +
-      `📘 <b>Subject:</b> ${escapeHtml(subject)} (${escapeHtml(scopeLabel)})\n` +
-      `💯 <b>Max Marks:</b> ${totalMarks} | ⏱️ <b>Time:</b> ${durationMinutes} Minutes\n\n` +
+    `📝 <b>MOCK TEST STARTED</b>\n` +
+      `📘 <b>${escapeHtml(subject)}</b> (${escapeHtml(scopeLabel)})\n` +
+      `💯 <b>Full Marks:</b> ${totalMarks} | ⏱️ <b>Time:</b> ${durationMinutes} Minutes\n\n` +
       `${escapeHtml(paper)}\n\n` +
-      `👉 Apne answers likh kar bhej sakte hain ya jab chahein Submit karke Answer Key dekh sakte hain:`,
+      `Apne answers likh kar bhejein ya neeche button dabayein:`,
     {
       reply_markup: {
         inline_keyboard: [
-          [{ text: "⏱️ Bacha Hua Time Dekhein", callback_data: "mock_time_left" }],
-          [{ text: "✅ Submit Test & Answer Key", callback_data: "mock_submit" }]
+          [makeBtn("⏱️ Remaining Time", "mock_time_left", "green")],
+          [makeBtn("✅ Submit Test & Answers", "mock_submit", "green")]
         ]
       }
     }
@@ -357,7 +391,7 @@ Bilkul exam question paper jaisa likho. Answer key abhi mat dena.`;
 async function finishMockTest(chatId, isAutoTimeUp = false) {
   const session = activeTests[chatId];
   if (!session) {
-    await sendTelegramMessage(chatId, "⚠️ Koi active Mock Test nahi chal raha hai.");
+    await sendTelegramMessage(chatId, "⚠️ Abhi koi active Mock Test nahi chal raha hai.");
     return;
   }
 
@@ -365,23 +399,23 @@ async function finishMockTest(chatId, isAutoTimeUp = false) {
   delete activeTests[chatId];
 
   const header = isAutoTimeUp
-    ? "⏰ <b>TIME SAMAPT!</b> Aapka Mock Test automatically submit ho gaya hai.\n\n"
-    : "✅ <b>MOCK TEST SUBMITTED!</b>\n\n";
+    ? "⏰ <b>TIME OVER!</b> Test automatically submit ho gaya hai.\n\n"
+    : "✅ <b>TEST SUBMITTED!</b>\n\n";
 
-  const solutionPrompt = `Niche diye gaye PCI Pharmacy Mock Test paper ka complete Answer Key & Marking Guide banao (MCQs ke sahi option + Short aur Long questions ke main points):\n\n${session.paper}`;
-  const solutions = await askGemini(solutionPrompt, false);
+  const ansPrompt = `Niche diye gaye Mock Test paper ki complete Answer Key aur solutions likho:\n\n${session.paper}`;
+  const solutions = await askGemini([{ text: ansPrompt }], false, 0.25);
 
   await sendLongMessage(
     chatId,
-    `${header}📊 <b>ANSWER KEY & SOLUTIONS (${session.subject} — ${session.unit}):</b>\n\n${escapeHtml(solutions)}`,
+    `${header}📊 <b>ANSWER KEY (${escapeHtml(session.subject)} — ${escapeHtml(session.unit)}):</b>\n\n${escapeHtml(solutions)}`,
     {
       reply_markup: {
-        inline_keyboard: [[{ text: "🔙 Main Menu", callback_data: "main_menu" }]]
+        inline_keyboard: [[makeBtn("🔙 Main Menu", "main_menu", "green")]]
       }
     }
   );
 }
-async function showMainMenu(chatId, user) {
+async function showStartDashboard(chatId, userId, username, user) {
   await deletePrevMessage(chatId, user);
   user.selectedCategory = null;
   user.selectedCourse = null;
@@ -389,156 +423,201 @@ async function showMainMenu(chatId, user) {
   user.selectedSemester = null;
   user.selectedSubject = null;
   user.selectedUnit = null;
-  user.selectedMode = null;
+  user.selectedFeature = null;
   persistAll();
+
+  const roleText = isAdmin(userId) ? "Admin" : "Student";
+  const displayName = username ? `@${escapeHtml(username)}` : `User ${escapeHtml(String(userId))}`;
+
+  const welcomeText =
+    `🌸 <b>- STUDY MATERIAL BOT -</b> 🌸\n\n` +
+    `👤 Hello, <b>${displayName}</b>!\n\n` +
+    `📚 <b>Your Complete Study Assistant</b>\n\n` +
+    `— 📖 <b>Syllabus</b> (Subject &gt; Units &amp; Topics)\n` +
+    `— ✍️ <b>Hand Written Notes</b> (Structured Text Format)\n` +
+    `— 📜 <b>PYQ Question</b> (Past Exam Questions + Answers)\n` +
+    `— 🎯 <b>Mock Test</b> (Full Course &amp; Single Unit + Timer)\n` +
+    `— 🤖 <b>AI Assistant</b> (Ask Any Study Question)\n` +
+    `— 🔗 <b>Links</b> (Admit Card &amp; Result via Google)\n\n` +
+    `━━━━━━━━━━━━━━━━━━━━\n` +
+    `👤 <b>User ID:</b> <code>${escapeHtml(String(userId))}</code>\n` +
+    `🎖️ <b>Access:</b> <b>${roleText}</b>\n` +
+    `━━━━━━━━━━━━━━━━━━━━\n\n` +
+    `<i>Tap any button below to begin.</i>`;
+
+  const keyboard = [
+    [
+      makeBtn("📘 Syllabus", "feat_syllabus", "blue"),
+      makeBtn("✍️ Hand Written Notes", "feat_notes", "blue")
+    ],
+    [
+      makeBtn("📜 PYQ Question", "feat_pyq", "green"),
+      makeBtn("🎯 Mock Test", "feat_mock", "green")
+    ],
+    [
+      makeBtn("🤖 AI Assistant", "feat_ai", "green"),
+      makeBtn("🔗 Links", "feat_links", "blue")
+    ]
+  ];
+
+  const sent = await sendTelegramMessage(chatId, welcomeText, {
+    reply_markup: { inline_keyboard: keyboard }
+  });
+  if (sent) {
+    user.lastMessageId = sent.message_id;
+    persistAll();
+  }
+}
+async function showCategoriesForFeature(chatId, user, featCode) {
+  user.selectedFeature = featCode;
+  persistAll();
+  await deletePrevMessage(chatId, user);
 
   const catList = getCategoryList();
   const rows = [];
   for (let i = 0; i < catList.length; i += 2) {
-    const row = [{ text: `📂 ${catList[i]}`, callback_data: `cat_${i}` }];
+    const r = [makeBtn(`📂 ${catList[i]}`, `fcat_${featCode}_${i}`, "green")];
     if (catList[i + 1]) {
-      row.push({ text: `📂 ${catList[i + 1]}`, callback_data: `cat_${i + 1}` });
+      r.push(makeBtn(`📂 ${catList[i + 1]}`, `fcat_${featCode}_${i + 1}`, "green"));
     }
-    rows.push(row);
+    rows.push(r);
   }
+  rows.push([makeBtn("🔙 Main Menu", "main_menu", "green")]);
 
-  const sent = await sendTelegramMessage(
-    chatId,
-    "🎓 <b>STUDY MATERIAL BOT</b>\n\nApni <b>Category</b> chunein:",
-    { reply_markup: { inline_keyboard: rows } }
-  );
+  const sent = await sendTelegramMessage(chatId, "📂 <b>Category</b> chunein:", {
+    reply_markup: { inline_keyboard: rows }
+  });
   if (sent) {
     user.lastMessageId = sent.message_id;
     persistAll();
   }
 }
 
-async function showCoursesMenu(chatId, user, cIdx) {
-  const catList = getCategoryList();
-  const catName = catList[cIdx];
-  if (!catName) return showMainMenu(chatId, user);
+async function showCoursesForFeature(chatId, user, featCode, cIdx) {
+  const catName = getCategoryList()[cIdx];
+  if (!catName) return showCategoriesForFeature(chatId, user, featCode);
 
   user.selectedCategory = catName;
-  user.selectedCourse = null;
-  user.selectedYear = null;
-  user.selectedSemester = null;
   persistAll();
-
   await deletePrevMessage(chatId, user);
-  const courses = getCoursesForCategory(catName);
-  const rows = courses.map((courseName, sIdx) => [
-    { text: `📘 ${courseName}`, callback_data: `crs_${cIdx}_${sIdx}` }
-  ]);
-  rows.push([{ text: "🔙 Main Menu", callback_data: "main_menu" }]);
 
-  const sent = await sendTelegramMessage(
-    chatId,
-    `⚡ <b>${escapeHtml(catName.toUpperCase())}</b>\n\nApna <b>Course</b> chunein:`,
-    { reply_markup: { inline_keyboard: rows } }
-  );
+  const courses = getCoursesForCategory(catName);
+  const rows = courses.map((crs, sIdx) => [
+    makeBtn(`📘 ${crs}`, `fcrs_${featCode}_${cIdx}_${sIdx}`, "green")
+  ]);
+  rows.push([makeBtn("🔙 Back", `feat_${featCode}`, "green")]);
+
+  const sent = await sendTelegramMessage(chatId, `📂 <b>${escapeHtml(catName)}</b> — Course chunein:`, {
+    reply_markup: { inline_keyboard: rows }
+  });
   if (sent) {
     user.lastMessageId = sent.message_id;
     persistAll();
   }
 }
 
-async function showYearsMenu(chatId, user, cIdx, sIdx) {
+async function showYearsForFeature(chatId, user, featCode, cIdx, sIdx) {
   const catName = getCategoryList()[cIdx];
   const courseName = getCoursesForCategory(catName)[sIdx];
-  if (!catName || !courseName) return showMainMenu(chatId, user);
+  if (!catName || !courseName) return showCategoriesForFeature(chatId, user, featCode);
 
   user.selectedCategory = catName;
   user.selectedCourse = courseName;
   persistAll();
-
   await deletePrevMessage(chatId, user);
+
   const years = getYearsForCourse(catName, courseName);
   const rows = years.map((yr, yIdx) => [
-    { text: `📅 ${yr}`, callback_data: `yr_${cIdx}_${sIdx}_${yIdx}` }
+    makeBtn(`📅 ${yr}`, `fyr_${featCode}_${cIdx}_${sIdx}_${yIdx}`, "green")
   ]);
-  rows.push([{ text: "🔙 Back to Courses", callback_data: `cat_${cIdx}` }]);
+  rows.push([makeBtn("🔙 Back", `fcat_${featCode}_${cIdx}`, "green")]);
 
-  const sent = await sendTelegramMessage(
-    chatId,
-    `📘 <b>${escapeHtml(catName)} — ${escapeHtml(courseName)}</b>\n\nApna <b>Year</b> chunein:`,
-    { reply_markup: { inline_keyboard: rows } }
-  );
+  const sent = await sendTelegramMessage(chatId, `📘 <b>${escapeHtml(courseName)}</b> — Year chunein:`, {
+    reply_markup: { inline_keyboard: rows }
+  });
   if (sent) {
     user.lastMessageId = sent.message_id;
     persistAll();
   }
 }
 
-async function showSemestersMenu(chatId, user, cIdx, sIdx, yIdx) {
+async function showSemestersForFeature(chatId, user, featCode, cIdx, sIdx, yIdx) {
   const catName = getCategoryList()[cIdx];
   const courseName = getCoursesForCategory(catName)[sIdx];
   const yearName = getYearsForCourse(catName, courseName)[yIdx];
-  if (!catName || !courseName || !yearName) return showMainMenu(chatId, user);
+  if (!catName || !courseName || !yearName) return showCategoriesForFeature(chatId, user, featCode);
 
   user.selectedCategory = catName;
   user.selectedCourse = courseName;
   user.selectedYear = yearName;
   persistAll();
 
+  if (featCode === "links") {
+    const linkInfo = await fetchOfficialLinks(courseName, yearName, "");
+    await sendLongMessage(
+      chatId,
+      `🔗 <b>ADMIT CARD &amp; RESULT LINKS (${escapeHtml(courseName)} — ${escapeHtml(yearName)}):</b>\n\n${escapeHtml(linkInfo)}`,
+      { reply_markup: { inline_keyboard: [[makeBtn("🔙 Main Menu", "main_menu", "green")]] } }
+    );
+    return;
+  }
+
   await deletePrevMessage(chatId, user);
   const sems = getSemestersForYear(catName, courseName, yearName);
   const rows = sems.map((sem, mIdx) => [
-    { text: `🗓️ ${sem}`, callback_data: `sem_${cIdx}_${sIdx}_${yIdx}_${mIdx}` }
+    makeBtn(`🗓️ ${sem}`, `fsem_${featCode}_${cIdx}_${sIdx}_${yIdx}_${mIdx}`, "green")
   ]);
-  rows.push([{ text: "🔙 Back to Years", callback_data: `crs_${cIdx}_${sIdx}` }]);
+  rows.push([makeBtn("🔙 Back", `fcrs_${featCode}_${cIdx}_${sIdx}`, "green")]);
 
-  const sent = await sendTelegramMessage(
-    chatId,
-    `📅 <b>${escapeHtml(courseName)} — ${escapeHtml(yearName)}</b>\n\nApna <b>Semester / Syllabus</b> chunein:`,
-    { reply_markup: { inline_keyboard: rows } }
-  );
+  const sent = await sendTelegramMessage(chatId, `📅 <b>${escapeHtml(yearName)}</b> — Semester chunein:`, {
+    reply_markup: { inline_keyboard: rows }
+  });
   if (sent) {
     user.lastMessageId = sent.message_id;
     persistAll();
   }
 }
-function getSubjectsForCurrentContext(user) {
+function getSubjectsList(user) {
   const prefix = `${user.selectedCategory}|${user.selectedCourse}|${user.selectedYear}|${user.selectedSemester}|`;
-  const subjSet = new Set();
+  const set = new Set();
 
   Object.keys(db.topics || {}).forEach((k) => {
     if (k.startsWith(prefix)) {
-      const rest = k.slice(prefix.length);
-      const subj = rest.split("|")[0];
-      if (subj) subjSet.add(subj);
+      const subj = k.slice(prefix.length).split("|")[0];
+      if (subj) set.add(subj);
     }
   });
 
-  if (subjSet.size === 0 && user.selectedCategory === "Pharmacy" && user.selectedCourse === "B.Pharma") {
+  if (set.size === 0 && user.selectedCategory === "Pharmacy" && user.selectedCourse === "B.Pharma") {
     if (user.selectedSemester === "Semester 1") {
-      ["Introduction to Pharmacognosy", "Human Anatomy and Physiology I", "Pharmaceutical Analysis I", "Pharmaceutics I"].forEach((s) => subjSet.add(s));
+      ["Introduction to Pharmacognosy", "Human Anatomy and Physiology I", "Pharmaceutical Analysis I", "Pharmaceutics I"].forEach((s) => set.add(s));
     } else if (user.selectedSemester === "Semester 2") {
-      ["Pharmaceutical Organic Chemistry I", "Human Anatomy and Physiology II", "Biochemistry", "Pathophysiology", "Computer Applications in Pharmacy", "Environmental Sciences"].forEach((s) => subjSet.add(s));
+      ["Pharmaceutical Organic Chemistry I", "Human Anatomy and Physiology II", "Biochemistry", "Pathophysiology"].forEach((s) => set.add(s));
     }
   }
 
-  return Array.from(subjSet);
+  return Array.from(set);
 }
 
-function getUnitsForSubject(user, subjectName) {
+function getUnitsList(user, subjectName) {
   const prefix = `${user.selectedCategory}|${user.selectedCourse}|${user.selectedYear}|${user.selectedSemester}|${subjectName}|`;
-  const unitSet = new Set();
+  const set = new Set();
 
   Object.keys(db.topics || {}).forEach((k) => {
     if (k.startsWith(prefix)) {
       const unit = k.slice(prefix.length);
-      if (unit) unitSet.add(unit);
+      if (unit) set.add(unit);
     }
   });
 
-  if (unitSet.size === 0) {
-    ["Unit 1", "Unit 2", "Unit 3", "Unit 4", "Unit 5"].forEach((u) => unitSet.add(u));
+  if (set.size === 0) {
+    ["Unit 1", "Unit 2", "Unit 3", "Unit 4", "Unit 5"].forEach((u) => set.add(u));
   }
 
-  return Array.from(unitSet);
+  return Array.from(set);
 }
 
-async function showSubjectsMenu(chatId, user, cIdx, sIdx, yIdx, mIdx) {
+async function showSubjectsForFeature(chatId, user, featCode, cIdx, sIdx, yIdx, mIdx) {
   const catName = getCategoryList()[cIdx];
   const courseName = getCoursesForCategory(catName)[sIdx];
   const yearName = getYearsForCourse(catName, courseName)[yIdx];
@@ -550,43 +629,61 @@ async function showSubjectsMenu(chatId, user, cIdx, sIdx, yIdx, mIdx) {
   user.selectedSemester = semName;
   persistAll();
 
-  await deletePrevMessage(chatId, user);
-  const subjects = getSubjectsForCurrentContext(user);
-  const rows = subjects.map((subj, subIdx) => [
-    { text: `📖 ${subj}`, callback_data: `sub_${cIdx}_${sIdx}_${yIdx}_${mIdx}_${subIdx}` }
-  ]);
-  rows.push([{ text: "🔙 Back to Semesters", callback_data: `yr_${cIdx}_${sIdx}_${yIdx}` }]);
+  if (featCode === "links") {
+    const linkInfo = await fetchOfficialLinks(courseName, yearName, semName);
+    await sendLongMessage(
+      chatId,
+      `🔗 <b>ADMIT CARD &amp; RESULT LINKS (${escapeHtml(courseName)} — ${escapeHtml(semName)}):</b>\n\n${escapeHtml(linkInfo)}`,
+      { reply_markup: { inline_keyboard: [[makeBtn("🔙 Main Menu", "main_menu", "green")]] } }
+    );
+    return;
+  }
 
-  const sent = await sendTelegramMessage(
-    chatId,
-    `🗓️ <b>${escapeHtml(courseName)} — ${escapeHtml(semName)}</b>\n\nApna <b>Subject</b> chunein:`,
-    { reply_markup: { inline_keyboard: rows } }
-  );
+  await deletePrevMessage(chatId, user);
+  const subjects = getSubjectsList(user);
+  const rows = subjects.map((subj, subIdx) => [
+    makeBtn(`📖 ${subj}`, `fsub_${featCode}_${cIdx}_${sIdx}_${yIdx}_${mIdx}_${subIdx}`, "green")
+  ]);
+  rows.push([makeBtn("🔙 Back", `fyr_${featCode}_${cIdx}_${sIdx}_${yIdx}`, "green")]);
+
+  const sent = await sendTelegramMessage(chatId, `🗓️ <b>${escapeHtml(semName)}</b> — Subject chunein:`, {
+    reply_markup: { inline_keyboard: rows }
+  });
   if (sent) {
     user.lastMessageId = sent.message_id;
     persistAll();
   }
 }
 
-async function showUnitsMenu(chatId, user, cIdx, sIdx, yIdx, mIdx, subIdx) {
-  const subjects = getSubjectsForCurrentContext(user);
+async function showUnitsForFeature(chatId, user, featCode, cIdx, sIdx, yIdx, mIdx, subIdx) {
+  const subjects = getSubjectsList(user);
   const subjectName = subjects[subIdx];
-  if (!subjectName) return showMainMenu(chatId, user);
+  if (!subjectName) return showCategoriesForFeature(chatId, user, featCode);
 
   user.selectedSubject = subjectName;
   persistAll();
-
   await deletePrevMessage(chatId, user);
-  const units = getUnitsForSubject(user, subjectName);
-  const rows = units.map((u, uIdx) => [
-    { text: `📑 ${u}`, callback_data: `unt_${cIdx}_${sIdx}_${yIdx}_${mIdx}_${subIdx}_${uIdx}` }
-  ]);
-  rows.push([{ text: "📝 Full Course Mock Test (75M | 3h)", callback_data: `mfull_${cIdx}_${sIdx}_${yIdx}_${mIdx}_${subIdx}` }]);
-  rows.push([{ text: "🔙 Back to Subjects", callback_data: `sem_${cIdx}_${sIdx}_${yIdx}_${mIdx}` }]);
+
+  const rows = [];
+  if (featCode === "mock") {
+    rows.push([
+      makeBtn("📚 Full Course Mock Test (75M | 3h)", `run_mfull_${cIdx}_${sIdx}_${yIdx}_${mIdx}_${subIdx}_0`, "green")
+    ]);
+  }
+
+  const units = getUnitsList(user, subjectName);
+  units.forEach((unitName, uIdx) => {
+    const tone = featCode === "syllabus" || featCode === "notes" ? "blue" : "green";
+    rows.push([
+      makeBtn(`📑 ${unitName}`, `run_${featCode}_${cIdx}_${sIdx}_${yIdx}_${mIdx}_${subIdx}_${uIdx}`, tone)
+    ]);
+  });
+
+  rows.push([makeBtn("🔙 Back", `fsem_${featCode}_${cIdx}_${sIdx}_${yIdx}_${mIdx}`, "green")]);
 
   const sent = await sendTelegramMessage(
     chatId,
-    `📖 <b>${escapeHtml(subjectName)}</b>\n\n<b>Unit</b> chunein ya <b>Full Course Mock Test</b> start karein:`,
+    `📖 <b>${escapeHtml(subjectName)}</b> — Unit chunein:`,
     { reply_markup: { inline_keyboard: rows } }
   );
   if (sent) {
@@ -595,392 +692,334 @@ async function showUnitsMenu(chatId, user, cIdx, sIdx, yIdx, mIdx, subIdx) {
   }
 }
 
-async function showUnitActionsMenu(chatId, user, cIdx, sIdx, yIdx, mIdx, subIdx, uIdx) {
-  const subjects = getSubjectsForCurrentContext(user);
-  const subjectName = subjects[subIdx];
-  const units = getUnitsForSubject(user, subjectName);
-  const unitName = units[uIdx];
-  if (!subjectName || !unitName) return showMainMenu(chatId, user);
+async function executeFeatureOnUnit(chatId, user, featCode, cIdx, sIdx, yIdx, mIdx, subIdx, uIdx) {
+  const catName = getCategoryList()[cIdx];
+  const courseName = getCoursesForCategory(catName)[sIdx];
+  const yearName = getYearsForCourse(catName, courseName)[yIdx];
+  const semName = getSemestersForYear(catName, courseName, yearName)[mIdx];
+  const ctx = { selectedCategory: catName, selectedCourse: courseName, selectedYear: yearName, selectedSemester: semName };
+  const subjectName = getSubjectsList(ctx)[subIdx];
+  const unitName = getUnitsList(ctx, subjectName)[uIdx];
 
   user.selectedSubject = subjectName;
   user.selectedUnit = unitName;
   persistAll();
 
-  const topicKey = `${user.selectedCategory}|${user.selectedCourse}|${user.selectedYear}|${user.selectedSemester}|${subjectName}|${unitName}`;
-  const savedTopic = db.topics[topicKey];
-
-  const baseIdx = `${cIdx}_${sIdx}_${yIdx}_${mIdx}_${subIdx}_${uIdx}`;
-  const rows = [
-    [{ text: "📚 Detailed Notes (Scribd/PCI AI)", callback_data: `act_notes_${baseIdx}` }],
-    [{ text: "📜 PYQ Questions (Previous Years)", callback_data: `act_pyq_${baseIdx}` }],
-    [{ text: "🎯 Single Unit Mock Test (30M | 1h)", callback_data: `act_munit_${baseIdx}` }],
-    [{ text: "📝 Full Course Mock Test (75M | 3h)", callback_data: `act_mfull_${baseIdx}` }],
-    [{ text: "🔙 Back to Units", callback_data: `sub_${cIdx}_${sIdx}_${yIdx}_${mIdx}_${subIdx}` }]
-  ];
-
-  const syllabusInfo = savedTopic ? `\n\n📌 <b>Syllabus Topics:</b>\n${escapeHtml(savedTopic)}` : "";
-  await sendTelegramMessage(
-    chatId,
-    `📑 <b>${escapeHtml(subjectName)} — ${escapeHtml(unitName)}</b>${syllabusInfo}\n\nKya chahiye?`,
-    { reply_markup: { inline_keyboard: rows } }
-  );
-}
-async function handleAdminCommand(chatId, userId, text) {
-  if (!isAdmin(userId)) {
-    await sendTelegramMessage(chatId, "⛔ Aapko admin commands chalane ki permission nahi hai.");
-    return true;
+  if (featCode === "syllabus") {
+    const key = `${catName}|${courseName}|${yearName}|${semName}|${subjectName}|${unitName}`;
+    const saved = db.topics[key] || "Is unit ka syllabus abhi admin ne add nahi kiya hai.";
+    await sendLongMessage(
+      chatId,
+      `📘 <b>SYLLABUS: ${escapeHtml(subjectName)} — ${escapeHtml(unitName)}</b>\n\n${escapeHtml(saved)}`,
+      { reply_markup: { inline_keyboard: [[makeBtn("🔙 Main Menu", "main_menu", "green")]] } }
+    );
+    return;
   }
+
+  if (featCode === "notes") {
+    const key = `${catName}|${courseName}|${yearName}|${semName}|${subjectName}|${unitName}`;
+    const noteText = db.handwrittenNotes[key];
+    if (!noteText) {
+      await sendTelegramMessage(
+        chatId,
+        `✍️ <b>${escapeHtml(subjectName)} — ${escapeHtml(unitName)}</b> ke notes abhi admin ne upload nahi kiye hain.`,
+        { reply_markup: { inline_keyboard: [[makeBtn("🔙 Main Menu", "main_menu", "green")]] } }
+      );
+      return;
+    }
+    await sendLongMessage(chatId, escapeHtml(noteText), {
+      reply_markup: { inline_keyboard: [[makeBtn("🔙 Main Menu", "main_menu", "green")]] }
+    });
+    return;
+  }
+
+  if (featCode === "pyq") {
+    await sendTelegramMessage(chatId, `📜 <b>Past PYQs</b> fetch ho rahe hain: <b>${escapeHtml(subjectName)} — ${escapeHtml(unitName)}</b>...`);
+    const pyqOut = await generatePastPYQs(courseName, yearName, semName, subjectName, unitName);
+    await sendLongMessage(
+      chatId,
+      `📜 <b>PYQ QUESTIONS: ${escapeHtml(subjectName)} (${escapeHtml(unitName)})</b>\n\n${escapeHtml(pyqOut)}`,
+      { reply_markup: { inline_keyboard: [[makeBtn("🔙 Main Menu", "main_menu", "green")]] } }
+    );
+    return;
+  }
+
+  if (featCode === "mock") {
+    return startMockTest(chatId, "unit", courseName, yearName, semName, subjectName, unitName);
+  }
+}
+async function handleAdminCommands(chatId, userId, text) {
+  if (!isAdmin(userId)) return false;
 
   if (text.startsWith("/add_cat ")) {
     const catName = text.replace("/add_cat ", "").trim();
-    if (!catName) {
-      await sendTelegramMessage(chatId, "⚠️ Use: /add_cat CategoryName");
-      return true;
-    }
-    if (!db.categories[catName]) {
-      db.categories[catName] = [];
-      persistAll();
-    }
-    await sendTelegramMessage(chatId, `✅ Category added: <b>${escapeHtml(catName)}</b>`);
-    return true;
+    if (!catName) return sendTelegramMessage(chatId, "⚠️ Use: /add_cat CategoryName"), true;
+    if (!db.categories[catName]) db.categories[catName] = [];
+    persistAll();
+    return sendTelegramMessage(chatId, `✅ Category added: <b>${escapeHtml(catName)}</b>`), true;
   }
 
   if (text.startsWith("/add_course ")) {
-    const parts = text.replace("/add_course ", "").split("|").map((s) => s.trim());
-    const [catName, courseName] = parts;
-    if (!catName || !courseName) {
-      await sendTelegramMessage(chatId, "⚠️ Use: /add_course Category | Course");
-      return true;
-    }
+    const [catName, courseName] = text.replace("/add_course ", "").split("|").map((s) => s.trim());
+    if (!catName || !courseName) return sendTelegramMessage(chatId, "⚠️ Use: /add_course Category | Course"), true;
     if (!db.categories[catName]) db.categories[catName] = [];
-    if (!db.categories[catName].includes(courseName)) {
-      db.categories[catName].push(courseName);
-      persistAll();
-    }
-    await sendTelegramMessage(chatId, `✅ Course <b>${escapeHtml(courseName)}</b> added under <b>${escapeHtml(catName)}</b>`);
-    return true;
-  }
-
-  if (text.startsWith("/add_year ")) {
-    const parts = text.replace("/add_year ", "").split("|").map((s) => s.trim());
-    const [catName, courseName, yearName] = parts;
-    if (!catName || !courseName || !yearName) {
-      await sendTelegramMessage(chatId, "⚠️ Use: /add_year Category | Course | Year");
-      return true;
-    }
-    const key = `${catName}|${courseName}`;
-    if (!db.customYears[key]) db.customYears[key] = [];
-    if (!db.customYears[key].includes(yearName)) {
-      db.customYears[key].push(yearName);
-      persistAll();
-    }
-    await sendTelegramMessage(chatId, `✅ Year <b>${escapeHtml(yearName)}</b> added.`);
-    return true;
-  }
-
-  if (text.startsWith("/add_sem ")) {
-    const parts = text.replace("/add_sem ", "").split("|").map((s) => s.trim());
-    const [catName, courseName, yearName, semName] = parts;
-    if (!catName || !courseName || !yearName || !semName) {
-      await sendTelegramMessage(chatId, "⚠️ Use: /add_sem Category | Course | Year | Semester");
-      return true;
-    }
-    const key = `${catName}|${courseName}|${yearName}`;
-    if (!db.customSemesters[key]) db.customSemesters[key] = [];
-    if (!db.customSemesters[key].includes(semName)) {
-      db.customSemesters[key].push(semName);
-      persistAll();
-    }
-    await sendTelegramMessage(chatId, `✅ Semester <b>${escapeHtml(semName)}</b> added.`);
-    return true;
+    if (!db.categories[catName].includes(courseName)) db.categories[catName].push(courseName);
+    persistAll();
+    return sendTelegramMessage(chatId, `✅ Course added: <b>${escapeHtml(courseName)}</b>`), true;
   }
 
   if (text.startsWith("/add_topic ")) {
     const parts = text.replace("/add_topic ", "").split("|").map((s) => s.trim());
     if (parts.length < 7) {
-      await sendTelegramMessage(
-        chatId,
-        "⚠️ Use: /add_topic Category | Course | Year | Semester | Subject | Unit | Topics"
-      );
-      return true;
+      return sendTelegramMessage(chatId, "⚠️ Use: /add_topic Category | Course | Year | Semester | Subject | Unit | Topics"), true;
     }
-    const [catName, courseName, yearName, semName, subjectName, unitName, ...topicParts] = parts;
-    const topicsText = topicParts.join(" | ").trim();
-    const key = `${catName}|${courseName}|${yearName}|${semName}|${subjectName}|${unitName}`;
-    db.topics[key] = topicsText;
+    const [catName, courseName, yearName, semName, subjectName, unitName, ...rest] = parts;
+    db.topics[`${catName}|${courseName}|${yearName}|${semName}|${subjectName}|${unitName}`] = rest.join(" | ");
     persistAll();
-    await sendTelegramMessage(
+    return sendTelegramMessage(chatId, `✅ Syllabus saved: <b>${escapeHtml(subjectName)} — ${escapeHtml(unitName)}</b>`), true;
+  }
+
+  // Admin: Notes add karna (photo bhejkar OCR text save karne ke liye)
+  if (text.startsWith("/add_note_photo ")) {
+    const parts = text.replace("/add_note_photo ", "").split("|").map((s) => s.trim());
+    if (parts.length < 6) {
+      return sendTelegramMessage(
+        chatId,
+        "⚠️ Use: /add_note_photo Category | Course | Year | Semester | Subject | Unit\nPhir notes ki photo bhejein."
+      ), true;
+    }
+    const [catName, courseName, yearName, semName, subjectName, unitName] = parts;
+    pendingNotesUpload[userId] = { catName, courseName, yearName, semName, subjectName, unitName };
+    return sendTelegramMessage(
       chatId,
-      `✅ Topic saved for <b>${escapeHtml(subjectName)}</b> — <b>${escapeHtml(unitName)}</b>`
-    );
-    return true;
+      `📸 Ab <b>${escapeHtml(subjectName)} — ${escapeHtml(unitName)}</b> ke notes ki <b>photo</b> bhejein. Bot uska text nikal kar notes mein save kar dega.`
+    ), true;
   }
 
-  return false;
-}
-async function handleDeleteCommands(chatId, userId, text) {
-  if (!isAdmin(userId)) return false;
-
-  if (text.startsWith("/del_cat")) {
-    const catName = text.replace("/del_cat", "").trim();
-    if (!catName || !db.categories[catName]) {
-      await sendTelegramMessage(chatId, "⚠️ Use: /del_cat CategoryName");
-      return true;
-    }
-    delete db.categories[catName];
-    persistAll();
-    await sendTelegramMessage(chatId, `🗑️ Category deleted: <b>${escapeHtml(catName)}</b>`);
-    return true;
-  }
-
-  if (text.startsWith("/del_course")) {
-    const raw = text.replace("/del_course", "").trim();
-    const parts = raw.split("|").map((s) => s.trim());
-    const catName = parts[0];
-    const courseName = parts.slice(1).join(" | ").trim();
-
-    if (!catName || !courseName || !db.categories[catName]) {
-      await sendTelegramMessage(chatId, "⚠️ Use: /del_course Category | CourseName");
-      return true;
-    }
-
-    const beforeLen = db.categories[catName].length;
-    db.categories[catName] = db.categories[catName].filter((c) => c !== courseName);
-    persistAll();
-
-    if (db.categories[catName].length < beforeLen) {
-      await sendTelegramMessage(
-        chatId,
-        `🗑️ Course Removed: <b>${escapeHtml(courseName)}</b> from <b>${escapeHtml(catName)}</b>`
-      );
-    } else {
-      await sendTelegramMessage(chatId, `⚠️ Course nahi mila: <b>${escapeHtml(courseName)}</b>`);
-    }
-    return true;
-  }
-
-  if (text.startsWith("/del_unit")) {
-    const raw = text.replace("/del_unit", "").trim();
-    const parts = raw.split("|").map((s) => s.trim());
-
+  // Admin: Direct text notes add karna
+  if (text.startsWith("/add_note ")) {
+    const parts = text.replace("/add_note ", "").split("|").map((s) => s.trim());
     if (parts.length < 7) {
-      await sendTelegramMessage(
-        chatId,
-        "⚠️ Use: /del_unit Category | Course | Year | Semester | StudyType | Subject | Unit"
-      );
-      return true;
+      return sendTelegramMessage(chatId, "⚠️ Use: /add_note Category | Course | Year | Semester | Subject | Unit | NotesText"), true;
     }
-
-    const [catName, courseName, yearName, semName, _studyType, subjectName, unitName] = parts;
+    const [catName, courseName, yearName, semName, subjectName, unitName, ...noteParts] = parts;
     const key = `${catName}|${courseName}|${yearName}|${semName}|${subjectName}|${unitName}`;
+    db.handwrittenNotes[key] = noteParts.join(" | ");
+    persistAll();
+    return sendTelegramMessage(chatId, `✅ Notes saved: <b>${escapeHtml(subjectName)} — ${escapeHtml(unitName)}</b>`), true;
+  }
 
+  // Admin: Notes hatana
+  if (text.startsWith("/del_note ")) {
+    const parts = text.replace("/del_note ", "").split("|").map((s) => s.trim());
+    if (parts.length < 6) {
+      return sendTelegramMessage(chatId, "⚠️ Use: /del_note Category | Course | Year | Semester | Subject | Unit"), true;
+    }
+    const [catName, courseName, yearName, semName, subjectName, unitName] = parts;
+    const key = `${catName}|${courseName}|${yearName}|${semName}|${subjectName}|${unitName}`;
+    if (db.handwrittenNotes[key]) {
+      delete db.handwrittenNotes[key];
+      persistAll();
+      return sendTelegramMessage(chatId, `🗑️ Notes deleted: <b>${escapeHtml(subjectName)} — ${escapeHtml(unitName)}</b>`), true;
+    }
+    return sendTelegramMessage(chatId, "⚠️ Ye notes nahi mile."), true;
+  }
+
+  // Admin: Unit/Syllabus hatana
+  if (text.startsWith("/del_unit ")) {
+    const parts = text.replace("/del_unit ", "").split("|").map((s) => s.trim());
+    if (parts.length < 6) {
+      return sendTelegramMessage(chatId, "⚠️ Use: /del_unit Category | Course | Year | Semester | Subject | Unit"), true;
+    }
+    const [catName, courseName, yearName, semName, subjectName, unitName] = parts;
+    const key = `${catName}|${courseName}|${yearName}|${semName}|${subjectName}|${unitName}`;
     if (db.topics[key]) {
       delete db.topics[key];
       persistAll();
-      await sendTelegramMessage(chatId, `🗑️ Unit deleted: <b>${escapeHtml(unitName)}</b>`);
-    } else {
-      await sendTelegramMessage(chatId, "⚠️ Ye unit nahi mili.");
+      return sendTelegramMessage(chatId, `🗑️ Syllabus unit deleted: <b>${escapeHtml(unitName)}</b>`), true;
     }
-    return true;
+    return sendTelegramMessage(chatId, "⚠️ Ye unit nahi mili."), true;
   }
 
-  if (text.startsWith("/del_pdf")) {
-    const raw = text.replace("/del_pdf", "").trim();
-    const titleToDelete = raw.includes("|") ? raw.split("|").pop().trim() : raw;
-
-    if (!titleToDelete) {
-      await sendTelegramMessage(chatId, "⚠️ Use: /del_pdf TitleName");
-      return true;
+  if (text.startsWith("/del_course ")) {
+    const parts = text.replace("/del_course ", "").split("|").map((s) => s.trim());
+    const catName = parts[0];
+    const courseName = parts.slice(1).join(" | ").trim();
+    if (!catName || !courseName || !db.categories[catName]) {
+      return sendTelegramMessage(chatId, "⚠️ Use: /del_course Category | CourseName"), true;
     }
-
-    const beforeCount = db.uploadedPdfs.length;
-    db.uploadedPdfs = db.uploadedPdfs.filter(
-      (item) => String(item.title || "").toLowerCase() !== titleToDelete.toLowerCase()
-    );
+    db.categories[catName] = db.categories[catName].filter((c) => c !== courseName);
     persistAll();
-
-    if (db.uploadedPdfs.length < beforeCount) {
-      await sendTelegramMessage(chatId, `🗑️ Deleted: <b>${escapeHtml(titleToDelete)}</b>`);
-    } else {
-      await sendTelegramMessage(chatId, `⚠️ Ye note/PDF nahi mila: <b>${escapeHtml(titleToDelete)}</b>`);
-    }
-    return true;
+    return sendTelegramMessage(chatId, `🗑️ Course removed: <b>${escapeHtml(courseName)}</b>`), true;
   }
 
   return false;
 }
-async function handleCallbackQuery(callbackQuery) {
-  const chatId = callbackQuery.message.chat.id;
-  const data = callbackQuery.data || "";
+async function handleCallbackQuery(cq) {
+  const chatId = cq.message.chat.id;
+  const userId = cq.from?.id;
+  const username = cq.from?.username || cq.from?.first_name || "";
+  const data = cq.data || "";
   const user = getUser(chatId);
 
   if (TELEGRAM_API) {
     try {
-      await axios.post(`${TELEGRAM_API}/answerCallbackQuery`, {
-        callback_query_id: callbackQuery.id
-      });
+      await axios.post(`${TELEGRAM_API}/answerCallbackQuery`, { callback_query_id: cq.id });
     } catch (_) {}
   }
 
-  if (data === "main_menu") {
-    return showMainMenu(chatId, user);
+  if (data === "main_menu") return showStartDashboard(chatId, userId, username, user);
+
+  if (data.startsWith("feat_")) {
+    const featCode = data.replace("feat_", "");
+    if (featCode === "ai") {
+      user.selectedFeature = "ai";
+      persistAll();
+      return sendTelegramMessage(chatId, "🤖 <b>AI Assistant Ready!</b>\nApna sawal likh kar bhejein:");
+    }
+    return showCategoriesForFeature(chatId, user, featCode);
   }
 
-  if (data.startsWith("cat_")) {
-    const cIdx = parseInt(data.replace("cat_", ""), 10);
-    return showCoursesMenu(chatId, user, cIdx);
+  if (data.startsWith("fcat_")) {
+    const [, featCode, cIdx] = data.split("_");
+    return showCoursesForFeature(chatId, user, featCode, Number(cIdx));
   }
 
-  if (data.startsWith("crs_")) {
-    const [, cIdx, sIdx] = data.split("_").map(Number);
-    return showYearsMenu(chatId, user, cIdx, sIdx);
+  if (data.startsWith("fcrs_")) {
+    const [, featCode, cIdx, sIdx] = data.split("_");
+    return showYearsForFeature(chatId, user, featCode, Number(cIdx), Number(sIdx));
   }
 
-  if (data.startsWith("yr_")) {
-    const [, cIdx, sIdx, yIdx] = data.split("_").map(Number);
-    return showSemestersMenu(chatId, user, cIdx, sIdx, yIdx);
+  if (data.startsWith("fyr_")) {
+    const [, featCode, cIdx, sIdx, yIdx] = data.split("_");
+    return showSemestersForFeature(chatId, user, featCode, Number(cIdx), Number(sIdx), Number(yIdx));
   }
 
-  if (data.startsWith("sem_")) {
-    const [, cIdx, sIdx, yIdx, mIdx] = data.split("_").map(Number);
-    return showSubjectsMenu(chatId, user, cIdx, sIdx, yIdx, mIdx);
+  if (data.startsWith("fsem_")) {
+    const [, featCode, cIdx, sIdx, yIdx, mIdx] = data.split("_");
+    return showSubjectsForFeature(chatId, user, featCode, Number(cIdx), Number(sIdx), Number(yIdx), Number(mIdx));
   }
 
-  if (data.startsWith("sub_")) {
-    const [, cIdx, sIdx, yIdx, mIdx, subIdx] = data.split("_").map(Number);
-    return showUnitsMenu(chatId, user, cIdx, sIdx, yIdx, mIdx, subIdx);
+  if (data.startsWith("fsub_")) {
+    const [, featCode, cIdx, sIdx, yIdx, mIdx, subIdx] = data.split("_");
+    return showUnitsForFeature(chatId, user, featCode, Number(cIdx), Number(sIdx), Number(yIdx), Number(mIdx), Number(subIdx));
   }
 
-  if (data.startsWith("unt_")) {
-    const [, cIdx, sIdx, yIdx, mIdx, subIdx, uIdx] = data.split("_").map(Number);
-    return showUnitActionsMenu(chatId, user, cIdx, sIdx, yIdx, mIdx, subIdx, uIdx);
-  }
-
-  if (data.startsWith("mfull_")) {
-    const [, cIdx, sIdx, yIdx, mIdx, subIdx] = data.split("_").map(Number);
+  if (data.startsWith("run_mfull_")) {
+    const [, , cIdx, sIdx, yIdx, mIdx, subIdx] = data.split("_").map(Number);
     const catName = getCategoryList()[cIdx];
     const courseName = getCoursesForCategory(catName)[sIdx];
     const yearName = getYearsForCourse(catName, courseName)[yIdx];
     const semName = getSemestersForYear(catName, courseName, yearName)[mIdx];
-    const subjectName = getSubjectsForCurrentContext({
-      selectedCategory: catName,
-      selectedCourse: courseName,
-      selectedYear: yearName,
-      selectedSemester: semName
-    })[subIdx];
-
-    return startMockTest(chatId, "full", courseName, yearName, semName, subjectName, "All Units");
+    const subjectName = getSubjectsList({ selectedCategory: catName, selectedCourse: courseName, selectedYear: yearName, selectedSemester: semName })[subIdx];
+    return startMockTest(chatId, "full", courseName, yearName, semName, subjectName, "Full Course");
   }
 
-  if (data.startsWith("act_")) {
-    const parts = data.split("_");
-    const actionType = parts[1];
-    const [cIdx, sIdx, yIdx, mIdx, subIdx, uIdx] = parts.slice(2).map(Number);
-
-    const catName = getCategoryList()[cIdx];
-    const courseName = getCoursesForCategory(catName)[sIdx];
-    const yearName = getYearsForCourse(catName, courseName)[yIdx];
-    const semName = getSemestersForYear(catName, courseName, yearName)[mIdx];
-    const ctxUser = {
-      selectedCategory: catName,
-      selectedCourse: courseName,
-      selectedYear: yearName,
-      selectedSemester: semName
-    };
-    const subjectName = getSubjectsForCurrentContext(ctxUser)[subIdx];
-    const unitName = getUnitsForSubject(ctxUser, subjectName)[uIdx];
-
-    if (actionType === "notes") {
-      await sendTelegramMessage(
-        chatId,
-        `📖 <b>Detailed Notes Taiyar Ho Rahe Hain...</b>\n` +
-          `📘 <b>${escapeHtml(subjectName)}</b> — <b>${escapeHtml(unitName)}</b>\n\nGoogle Search + PCI syllabus se notes generate kiye ja rahe hain...`
-      );
-      const notesText = await generateDetailedNotes(courseName, yearName, semName, subjectName, unitName);
-      await sendLongMessage(
-        chatId,
-        `📚 <b>DETAILED NOTES: ${escapeHtml(subjectName)} (${escapeHtml(unitName)})</b>\n\n${escapeHtml(notesText)}`,
-        {
-          reply_markup: {
-            inline_keyboard: [[{ text: "🔙 Main Menu", callback_data: "main_menu" }]]
-          }
-        }
-      );
-      return;
-    }
-
-    if (actionType === "pyq") {
-      await sendTelegramMessage(
-        chatId,
-        `📜 <b>PYQ Questions Fetch Ho Rahe Hain...</b>\n` +
-          `📘 <b>${escapeHtml(subjectName)}</b> — <b>${escapeHtml(unitName)}</b>`
-      );
-      const pyqText = await generatePYQs(courseName, yearName, semName, subjectName, unitName);
-      await sendLongMessage(
-        chatId,
-        `📜 <b>PREVIOUS YEAR QUESTIONS: ${escapeHtml(subjectName)} (${escapeHtml(unitName)})</b>\n\n${escapeHtml(pyqText)}`,
-        {
-          reply_markup: {
-            inline_keyboard: [[{ text: "🔙 Main Menu", callback_data: "main_menu" }]]
-          }
-        }
-      );
-      return;
-    }
-
-    if (actionType === "munit") {
-      return startMockTest(chatId, "unit", courseName, yearName, semName, subjectName, unitName);
-    }
-
-    if (actionType === "mfull") {
-      return startMockTest(chatId, "full", courseName, yearName, semName, subjectName, "All Units");
-    }
+  if (data.startsWith("run_")) {
+    const [, featCode, cIdx, sIdx, yIdx, mIdx, subIdx, uIdx] = data.split("_");
+    return executeFeatureOnUnit(chatId, user, featCode, Number(cIdx), Number(sIdx), Number(yIdx), Number(mIdx), Number(subIdx), Number(uIdx));
   }
 
   if (data === "mock_time_left") {
     const session = activeTests[chatId];
-    if (!session) {
-      await sendTelegramMessage(chatId, "⚠️ Koi active Mock Test nahi chal raha hai.");
-      return;
-    }
+    if (!session) return sendTelegramMessage(chatId, "⚠️ Koi active Mock Test nahi hai.");
     const remMs = Math.max(0, session.endTime - Date.now());
-    const remMins = Math.floor(remMs / 60000);
-    const remSecs = Math.floor((remMs % 60000) / 1000);
-    await sendTelegramMessage(
-      chatId,
-      `⏱️ <b>Remaining Time:</b> ${remMins} minute(s) ${remSecs} second(s)`
-    );
-    return;
+    const mins = Math.floor(remMs / 60000);
+    const secs = Math.floor((remMs % 60000) / 1000);
+    return sendTelegramMessage(chatId, `⏱️ <b>Time Remaining:</b> ${mins}m ${secs}s`);
   }
 
   if (data === "mock_submit") {
     return finishMockTest(chatId, false);
   }
 }
+
+async function handlePhotoUpload(msg) {
+  const chatId = msg.chat.id;
+  const userId = msg.from?.id;
+
+  if (!isAdmin(userId) || !pendingNotesUpload[userId]) {
+    return sendTelegramMessage(
+      chatId,
+      "ℹ️ Notes mein photo add karne ke liye pehle admin command bhejein:\n<code>/add_note_photo Category | Course | Year | Semester | Subject | Unit</code>"
+    );
+  }
+
+  const meta = pendingNotesUpload[userId];
+  delete pendingNotesUpload[userId];
+
+  const photoArr = msg.photo || [];
+  const bestPhoto = photoArr[photoArr.length - 1];
+  if (!bestPhoto?.file_id || !TELEGRAM_API || !TELEGRAM_FILE_API) {
+    return sendTelegramMessage(chatId, "⚠️ Photo read nahi ho paayi.");
+  }
+
+  await sendTelegramMessage(chatId, "🔍 Photo ka text padh kar notes taiyar kiye ja rahe hain...");
+
+  try {
+    const fileInfo = await axios.get(`${TELEGRAM_API}/getFile?file_id=${bestPhoto.file_id}`);
+    const filePath = fileInfo.data?.result?.file_path;
+    const imgRes = await axios.get(`${TELEGRAM_FILE_API}/${filePath}`, { responseType: "arraybuffer" });
+    const structuredText = await extractStructuredNotesFromImage(Buffer.from(imgRes.data), "image/jpeg", {
+      course: meta.courseName,
+      year: meta.yearName,
+      sem: meta.semName,
+      subject: meta.subjectName,
+      unit: meta.unitName
+    });
+
+    const key = `${meta.catName}|${meta.courseName}|${meta.yearName}|${meta.semName}|${meta.subjectName}|${meta.unitName}`;
+    db.handwrittenNotes[key] = structuredText;
+    persistAll();
+
+    await sendLongMessage(
+      chatId,
+      `✅ <b>Notes Text Saved!</b>\n\n${escapeHtml(structuredText)}`,
+      { reply_markup: { inline_keyboard: [[makeBtn("🔙 Main Menu", "main_menu", "green")]] } }
+    );
+  } catch (err) {
+    console.error("Photo OCR Error:", err.message);
+    await sendTelegramMessage(chatId, "⚠️ Photo se text nikalne mein error aaya.");
+  }
+}
+
 async function handleMessage(msg) {
   const chatId = msg.chat.id;
   const userId = msg.from?.id;
-  const text = (msg.text || "").trim();
+  const username = msg.from?.username || msg.from?.first_name || "";
   const user = getUser(chatId);
 
+  if (Array.isArray(msg.photo) && msg.photo.length > 0) {
+    return handlePhotoUpload(msg);
+  }
+
+  if (msg.document) {
+    return sendTelegramMessage(
+      chatId,
+      "📄 File/PDF ke bajay <b>Photo</b> bhejein (ya <code>/add_note</code> se text notes daalein) taaki bot uska poora text nikal kar notes mein de sake."
+    );
+  }
+
+  const text = (msg.text || "").trim();
   if (!text) return;
 
   if (text === "/start" || text === "/menu") {
-    return showMainMenu(chatId, user);
+    return showStartDashboard(chatId, userId, username, user);
   }
 
-  const handledDelete = await handleDeleteCommands(chatId, userId, text);
-  if (handledDelete) return;
-
-  const handledAdmin = await handleAdminCommand(chatId, userId, text);
-  if (handledAdmin) return;
+  if (await handleAdminCommands(chatId, userId, text)) return;
 
   if (activeTests[chatId]) {
-    await sendTelegramMessage(
+    return sendTelegramMessage(
       chatId,
-      "✍️ Aapka answer note kar liya gaya hai. Jab test poora ho jaye toh <b>Submit Test & Answer Key</b> button dabayein."
+      "✍️ Aapka answer record kar liya gaya hai. Test khatam hone par <b>Submit Test &amp; Answers</b> dabayein."
     );
   }
+
+  const aiReply = await askAiAssistant(chatId, text, user);
+  await sendLongMessage(chatId, aiReply, {
+    reply_markup: { inline_keyboard: [[makeBtn("🔙 Main Menu", "main_menu", "green")]] }
+  });
 }
 
 app.post("/webhook", async (req, res) => {
@@ -993,11 +1032,11 @@ app.post("/webhook", async (req, res) => {
       await handleCallbackQuery(update.callback_query);
     }
   } catch (err) {
-    console.error("Webhook Handling Error:", err.message);
+    console.error("Webhook Error:", err.message);
   }
 });
 app.get("/", (req, res) => {
-  res.status(200).send("Study Material & AI Mock Test Bot Server is Running.");
+  res.status(200).send("Study Material Bot Server is Running.");
 });
 
 app.listen(PORT, () => {
