@@ -68,7 +68,9 @@ function formatMB(bytes) {
 
 async function dispatchWorkflow(workflowFile, inputs) {
   if (!GITHUB_OWNER || !GITHUB_REPO || !GITHUB_TOKEN) {
-    throw new Error("GITHUB_OWNER, GITHUB_REPO, ya GITHUB_TOKEN env missing hai.");
+    throw new Error(
+      "GITHUB_OWNER, GITHUB_REPO, ya GITHUB_TOKEN env missing hai."
+    );
   }
 
   const url = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/actions/workflows/${workflowFile}/dispatches`;
@@ -93,6 +95,15 @@ async function dispatchWorkflow(workflowFile, inputs) {
 
 // Telegraf instance ko saare bot.command / bot.on handlers se PEHLE initialize karein
 const bot = new Telegraf(BOT_TOKEN);
+
+bot.catch(async (err, ctx) => {
+  console.error("TELEGRAF_UNHANDLED_ERROR:", err);
+  try {
+    if (ctx && ctx.reply) {
+      await ctx.reply(`Bot error: ${err.message || "Unknown error"}`);
+    }
+  } catch (_) {}
+});
 
 bot.start(async (ctx) => {
   sessions.set(ctx.from.id, {});
@@ -215,11 +226,13 @@ bot.on("text", async (ctx) => {
 bot.command("source", async (ctx) => {
   const s = getSession(ctx.from.id);
   if (!s.apkUrl) {
-    return ctx.reply("Pehle .apk file ka direct https:// link bhejein, phir /source likhein.");
+    return ctx.reply(
+      "Pehle .apk file ka direct https:// link bhejein, phir /source likhein."
+    );
   }
 
   const tagName = `source-${ctx.from.id}-${Date.now()}`;
-  const statusMsg = await ctx.reply("APK source code extraction start ho raha hai...");
+  await ctx.reply("APK source code extraction trigger kiya ja raha hai...");
 
   try {
     await dispatchWorkflow(SOURCE_WORKFLOW_FILE, {
@@ -227,10 +240,7 @@ bot.command("source", async (ctx) => {
       tag_name: tagName,
     });
 
-    await ctx.telegram.editMessageText(
-      ctx.chat.id,
-      statusMsg.message_id,
-      null,
+    await ctx.reply(
       [
         "Source extraction workflow trigger ho gaya!",
         `Tag: ${tagName}`,
@@ -238,12 +248,8 @@ bot.command("source", async (ctx) => {
       ].join("\n")
     );
   } catch (err) {
-    await ctx.telegram.editMessageText(
-      ctx.chat.id,
-      statusMsg.message_id,
-      null,
-      `Error: ${err.message}`
-    );
+    console.error("SOURCE_COMMAND_ERROR:", err);
+    await ctx.reply(`Source error: ${err.message}`);
   }
 });
 
@@ -257,9 +263,7 @@ bot.command("mergebuild", async (ctx) => {
   }
 
   const tagName = `merged-${ctx.from.id}-${Date.now()}`;
-  const statusMsg = await ctx.reply(
-    "Source + Website Panel merge aur APK build start ho raha hai..."
-  );
+  await ctx.reply("Source + Website Panel merge aur APK build start ho raha hai...");
 
   try {
     await dispatchWorkflow(MERGE_WORKFLOW_FILE, {
@@ -268,10 +272,7 @@ bot.command("mergebuild", async (ctx) => {
       tag_name: tagName,
     });
 
-    await ctx.telegram.editMessageText(
-      ctx.chat.id,
-      statusMsg.message_id,
-      null,
+    await ctx.reply(
       [
         "Merge & Build workflow start ho gaya!",
         `Tag: ${tagName}`,
@@ -279,12 +280,8 @@ bot.command("mergebuild", async (ctx) => {
       ].join("\n")
     );
   } catch (err) {
-    await ctx.telegram.editMessageText(
-      ctx.chat.id,
-      statusMsg.message_id,
-      null,
-      `Error: ${err.message}`
-    );
+    console.error("MERGEBUILD_COMMAND_ERROR:", err);
+    await ctx.reply(`Merge build error: ${err.message}`);
   }
 });
 
@@ -299,7 +296,7 @@ bot.command("build", async (ctx) => {
   }
 
   const tagName = `build-${ctx.from.id}-${Date.now()}`;
-  const statusMsg = await ctx.reply("GitHub Actions workflow trigger ho raha hai...");
+  await ctx.reply("GitHub Actions workflow trigger ho raha hai...");
 
   try {
     await dispatchWorkflow(WORKFLOW_FILE, {
@@ -309,10 +306,7 @@ bot.command("build", async (ctx) => {
       tag_name: tagName,
     });
 
-    await ctx.telegram.editMessageText(
-      ctx.chat.id,
-      statusMsg.message_id,
-      null,
+    await ctx.reply(
       [
         "Build workflow start ho gaya hai!",
         `Tag: ${tagName}`,
@@ -320,12 +314,8 @@ bot.command("build", async (ctx) => {
       ].join("\n")
     );
   } catch (err) {
-    await ctx.telegram.editMessageText(
-      ctx.chat.id,
-      statusMsg.message_id,
-      null,
-      `Build trigger fail hua:\n${err.message}`
-    );
+    console.error("BUILD_COMMAND_ERROR:", err);
+    await ctx.reply(`Build trigger fail hua:\n${err.message}`);
   }
 });
 
