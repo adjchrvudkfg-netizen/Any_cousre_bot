@@ -1,333 +1,671 @@
-const http = require("http");
-const { Telegraf } = require("telegraf");
-
-const BOT_TOKEN = (process.env.BOT_TOKEN || "").trim();
-const PORT = process.env.PORT || 3000;
-const MAX_FILE_BYTES = 1024 * 1024 * 1024; // 1 GB
-
-const GITHUB_OWNER = (process.env.GITHUB_OWNER || "").trim();
-const GITHUB_REPO = (process.env.GITHUB_REPO || "").trim();
-const GITHUB_TOKEN = (process.env.GITHUB_TOKEN || "").trim();
-const WORKFLOW_FILE = (process.env.WORKFLOW_FILE || "build-apk.yml").trim();
-const SOURCE_WORKFLOW_FILE = (
-  process.env.SOURCE_WORKFLOW_FILE || "extract-source.yml"
-).trim();
-const MERGE_WORKFLOW_FILE = (
-  process.env.MERGE_WORKFLOW_FILE || "merge-source-panel.yml"
-).trim();
-const GITHUB_BRANCH = (process.env.GITHUB_BRANCH || "main").trim();
-
-if (!BOT_TOKEN) {
-  console.error("Error: BOT_TOKEN environment variable missing ya empty hai.");
-  process.exit(1);
-}
-
-// Render Web Service health check ke liye HTTP server
-http
-  .createServer((req, res) => {
-    res.writeHead(200, { "Content-Type": "text/plain" });
-    res.end("Bot service is alive");
-  })
-  .listen(PORT, () => {
-    console.log(`HTTP server listening on port ${PORT}`);
-  });
-
-// userId -> { apkUrl?: string, sourceZipUrl?: string, websiteZipUrl?: string, websiteUrl?: string }
-const sessions = new Map();
-
-function getSession(userId) {
-  if (!sessions.has(userId)) {
-    sessions.set(userId, {});
-  }
-  return sessions.get(userId);
-}
-
-function isHttpUrl(str) {
-  try {
-    const u = new URL(str);
-    return u.protocol === "http:" || u.protocol === "https:";
-  } catch {
-    return false;
-  }
-}
-
-async function checkRemoteFileSize(url) {
-  try {
-    const res = await fetch(url, { method: "HEAD", redirect: "follow" });
-    if (!res.ok) return null;
-    const len = Number(res.headers.get("content-length") || 0);
-    return Number.isFinite(len) && len > 0 ? len : null;
-  } catch {
-    return null;
-  }
-}
-
-function formatMB(bytes) {
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-async function dispatchWorkflow(workflowFile, inputs) {
-  if (!GITHUB_OWNER || !GITHUB_REPO || !GITHUB_TOKEN) {
-    throw new Error(
-      "GITHUB_OWNER, GITHUB_REPO, ya GITHUB_TOKEN env missing hai."
-    );
-  }
-
-  const url = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/actions/workflows/${workflowFile}/dispatches`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${GITHUB_TOKEN}`,
-      Accept: "application/vnd.github+json",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      ref: GITHUB_BRANCH,
-      inputs,
-    }),
-  });
-
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`GitHub Actions dispatch fail (${res.status}): ${errText}`);
-  }
-}
-
-// Telegraf instance ko saare bot.command / bot.on handlers se PEHLE initialize karein
-const bot = new Telegraf(BOT_TOKEN);
-
-bot.catch(async (err, ctx) => {
-  console.error("TELEGRAF_UNHANDLED_ERROR:", err);
-  try {
-    if (ctx && ctx.reply) {
-      await ctx.reply(`Bot error: ${err.message || "Unknown error"}`);
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Study Hub — Syllabus, Notes, PYQ, Mock Test & Lectures</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #1e293b;
+      --card-2: #162033;
+      --text: #f8fafc;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+      --accent-2: #22c55e;
+      --danger: #ef4444;
+      --border: #334155;
     }
-  } catch (_) {}
-});
 
-bot.start(async (ctx) => {
-  sessions.set(ctx.from.id, {});
-  await ctx.reply(
-    [
-      "APK + Source + Website Panel Builder Bot (1 GB Support) Ready hai.",
-      "",
-      "Kaise use karein:",
-      "1. Base .apk ka direct download link (https://.../.apk) bhejein (1 GB tak).",
-      "2. /source se APK ka source code ZIP nikalein.",
-      "3. Source ZIP link + Website panel ZIP/link bhej kar /mergebuild se panel connect karke nayi APK banayein.",
-      "4. Ya APK link + Website URL/ZIP bhej kar /build chalayein.",
-      "5. /status se session dekhein, /reset se clear karein.",
-    ].join("\n")
-  );
-});
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    }
 
-bot.command("reset", async (ctx) => {
-  sessions.set(ctx.from.id, {});
-  await ctx.reply("Session reset ho gaya. Naye links ya files bhejein.");
-});
+    body {
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 16px;
+    }
 
-bot.command("status", async (ctx) => {
-  const s = getSession(ctx.from.id);
-  await ctx.reply(
-    [
-      "Current Session Status:",
-      `• APK URL: ${s.apkUrl || "Pending"}`,
-      `• Source ZIP URL: ${s.sourceZipUrl || "Not provided"}`,
-      `• Website ZIP URL: ${s.websiteZipUrl || "Not provided"}`,
-      `• Website URL: ${s.websiteUrl || "Not provided"}`,
-    ].join("\n")
-  );
-});
+    .container {
+      max-width: 980px;
+      margin: 0 auto;
+    }
 
-// Chhoti .zip files ke liye Telegram document support (20 MB limit tak)
-bot.on("document", async (ctx) => {
-  const doc = ctx.message.document;
-  const fileName = (doc.file_name || "").toLowerCase();
+    header {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 18px;
+      margin-bottom: 16px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      justify-content: space-between;
+      align-items: center;
+    }
 
-  if ((doc.file_size || 0) > 20 * 1024 * 1024) {
-    return ctx.reply(
-      "Telegram bot 20 MB se badi file direct download nahi kar sakta. Kripya 1 GB tak ki file ka direct https:// download link bhejein."
-    );
-  }
+    header h1 {
+      font-size: 1.35rem;
+    }
 
-  if (!fileName.endsWith(".zip")) {
-    return ctx.reply(
-      "Badi .apk file ka direct https:// link bhejein, ya chhoti .zip file bhejein."
-    );
-  }
+    header p {
+      color: var(--muted);
+      font-size: 0.9rem;
+      margin-top: 4px;
+    }
 
-  try {
-    const fileLink = await ctx.telegram.getFileLink(doc.file_id);
-    const s = getSession(ctx.from.id);
+    .badge {
+      background: rgba(56, 189, 248, 0.15);
+      color: var(--accent);
+      border: 1px solid rgba(56, 189, 248, 0.35);
+      padding: 6px 12px;
+      border-radius: 999px;
+      font-size: 0.85rem;
+      font-weight: 600;
+    }
 
-    if (fileName.includes("source")) {
-      s.sourceZipUrl = fileLink.href;
-      return ctx.reply(
-        "Source ZIP link session mein save ho gaya. Ab website panel ZIP/link bhej kar /mergebuild likhein."
+    .tabs {
+      display: flex;
+      gap: 8px;
+      overflow-x: auto;
+      padding-bottom: 6px;
+      margin-bottom: 16px;
+    }
+
+    .tab-btn {
+      background: var(--card);
+      color: var(--muted);
+      border: 1px solid var(--border);
+      padding: 10px 16px;
+      border-radius: 10px;
+      cursor: pointer;
+      font-weight: 600;
+      white-space: nowrap;
+      transition: 0.15s;
+    }
+
+    .tab-btn.active {
+      background: var(--accent);
+      color: #062030;
+      border-color: var(--accent);
+    }
+
+    .panel {
+      display: none;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 18px;
+    }
+
+    .panel.active {
+      display: block;
+    }
+
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+
+    input, select, textarea, button {
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      padding: 10px 12px;
+      font-size: 0.95rem;
+    }
+
+    input, select, textarea {
+      background: var(--card-2);
+      color: var(--text);
+      width: 100%;
+    }
+
+    .toolbar input, .toolbar select {
+      width: auto;
+      min-width: 180px;
+      flex: 1;
+    }
+
+    .btn {
+      background: var(--accent);
+      color: #062030;
+      font-weight: 700;
+      cursor: pointer;
+      border: none;
+    }
+
+    .btn.secondary {
+      background: var(--card-2);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+
+    .btn.success {
+      background: var(--accent-2);
+      color: #052e16;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(270px, 1fr));
+      gap: 14px;
+    }
+
+    .item-card {
+      background: var(--card-2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .meta {
+      font-size: 0.8rem;
+      color: var(--muted);
+    }
+
+    .syllabus-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      background: var(--card-2);
+      border: 1px solid var(--border);
+      padding: 12px 14px;
+      border-radius: 10px;
+      margin-bottom: 10px;
+    }
+
+    .syllabus-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .syllabus-left input[type="checkbox"] {
+      width: 18px;
+      height: 18px;
+      accent-color: var(--accent-2);
+      cursor: pointer;
+    }
+
+    .progress-bar {
+      width: 100%;
+      height: 10px;
+      background: var(--card-2);
+      border-radius: 999px;
+      overflow: hidden;
+      margin-bottom: 16px;
+      border: 1px solid var(--border);
+    }
+
+    .progress-fill {
+      height: 100%;
+      background: var(--accent-2);
+      width: 0%;
+      transition: width 0.25s ease;
+    }
+
+    .option-btn {
+      display: block;
+      width: 100%;
+      text-align: left;
+      background: var(--card-2);
+      color: var(--text);
+      margin-top: 8px;
+      cursor: pointer;
+    }
+
+    .option-btn.correct {
+      border-color: var(--accent-2);
+      background: rgba(34, 197, 94, 0.18);
+    }
+
+    .option-btn.wrong {
+      border-color: var(--danger);
+      background: rgba(239, 68, 68, 0.18);
+    }
+
+    .solution-box {
+      margin-top: 10px;
+      padding: 10px;
+      border-radius: 8px;
+      background: rgba(56, 189, 248, 0.12);
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      font-size: 0.9rem;
+      display: none;
+    }
+
+    .add-box {
+      background: var(--card-2);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 14px;
+      margin-bottom: 16px;
+      display: grid;
+      gap: 10px;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div>
+        <h1>Study Hub Portal</h1>
+        <p>Syllabus, Notes, PYQs, Mock Tests & Video Lectures</p>
+      </div>
+      <div class="badge" id="overallProgressBadge">Syllabus: 0% Complete</div>
+    </header>
+
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="syllabus">Syllabus</button>
+      <button class="tab-btn" data-tab="notes">Notes</button>
+      <button class="tab-btn" data-tab="pyq">PYQs</button>
+      <button class="tab-btn" data-tab="mock">Mock Test</button>
+      <button class="tab-btn" data-tab="lectures">Lectures</button>
+    </div>
+
+    <!-- 1. SYLLABUS -->
+    <section id="syllabus" class="panel active">
+      <div class="progress-bar">
+        <div class="progress-fill" id="syllabusBar"></div>
+      </div>
+      <div class="add-box">
+        <div style="display:flex; gap:10px; flex-wrap:wrap;">
+          <input id="sylSubject" placeholder="Subject (e.g. Physics)" style="flex:1; min-width:160px;" />
+          <input id="sylTopic" placeholder="Topic / Chapter name" style="flex:2; min-width:200px;" />
+          <button class="btn" onclick="addSyllabusItem()">+ Add Topic</button>
+        </div>
+      </div>
+      <div id="syllabusList"></div>
+    </section>
+
+    <!-- 2. NOTES -->
+    <section id="notes" class="panel">
+      <div class="toolbar">
+        <input id="noteSearch" placeholder="Search notes..." oninput="renderNotes()" />
+        <button class="btn" onclick="toggleNoteForm()">+ New Note</button>
+      </div>
+
+      <div id="noteForm" class="add-box" style="display:none;">
+        <input id="noteTitle" placeholder="Note title" />
+        <input id="noteSubject" placeholder="Subject / Tag" />
+        <textarea id="noteContent" rows="4" placeholder="Write concise study notes here..."></textarea>
+        <button class="btn success" onclick="saveNote()">Save Note</button>
+      </div>
+
+      <div class="grid" id="notesGrid"></div>
+    </section>
+
+    <!-- 3. PYQ -->
+    <section id="pyq" class="panel">
+      <div class="toolbar">
+        <select id="pyqYearFilter" onchange="renderPyqs()">
+          <option value="ALL">All Years</option>
+          <option value="2025">2025</option>
+          <option value="2024">2024</option>
+          <option value="2023">2023</option>
+        </select>
+        <select id="pyqSubjectFilter" onchange="renderPyqs()">
+          <option value="ALL">All Subjects</option>
+          <option value="General">General</option>
+          <option value="Core">Core</option>
+          <option value="Reasoning">Reasoning</option>
+        </select>
+      </div>
+      <div id="pyqList"></div>
+    </section>
+
+    <!-- 4. MOCK TEST -->
+    <section id="mock" class="panel">
+      <div class="toolbar" style="justify-content:space-between; align-items:center;">
+        <div class="badge" id="mockScoreBadge">Score: 0 / 0</div>
+        <button class="btn secondary" onclick="resetMockTest()">Restart Test</button>
+      </div>
+      <div id="mockContainer"></div>
+    </section>
+
+    <!-- 5. LECTURES -->
+    <section id="lectures" class="panel">
+      <div class="toolbar">
+        <input id="lectureSearch" placeholder="Search lecture or topic..." oninput="renderLectures()" />
+      </div>
+      <div class="grid" id="lecturesGrid"></div>
+    </section>
+  </div>
+  <script>
+    const STORAGE_KEY = "study_hub_data_v1";
+
+    const defaultData = {
+      syllabus: [
+        { id: 1, subject: "Fundamentals", topic: "Core Concepts & Terminology", done: true },
+        { id: 2, subject: "Fundamentals", topic: "Problem Solving Frameworks", done: false },
+        { id: 3, subject: "Applied", topic: "Case Studies & Real Scenarios", done: false },
+        { id: 4, subject: "Revision", topic: "Formula & Concept Summary Sheet", done: false }
+      ],
+      notes: [
+        {
+          id: 1,
+          title: "Key Revision Checklist",
+          subject: "General",
+          content: "Review high-weightage topics first, solve timed PYQs daily, and maintain an error log for mock tests."
+        },
+        {
+          id: 2,
+          title: "Exam Strategy Notes",
+          subject: "Strategy",
+          content: "Attempt high-accuracy questions in Round 1, mark doubtful ones for Round 2, and avoid blind guessing."
+        }
+      ],
+      pyqs: [
+        {
+          id: 1,
+          year: "2025",
+          subject: "Core",
+          question: "Which approach best minimizes careless mistakes during timed practice?",
+          solution: "Reading all options before selecting and re-checking units/conditions in the last 10 seconds."
+        },
+        {
+          id: 2,
+          year: "2024",
+          subject: "Reasoning",
+          question: "If all A are B and some B are C, does it necessarily follow that some A are C?",
+          solution: "No. 'Some B are C' does not guarantee overlap with the subset A."
+        },
+        {
+          id: 3,
+          year: "2023",
+          subject: "General",
+          question: "What is the primary purpose of analyzing mock test wrong answers?",
+          solution: "Identifying whether an error came from a concept gap, misreading, or time pressure."
+        }
+      ],
+      mockQuestions: [
+        {
+          q: "1. What should be your first step when starting a new chapter?",
+          options: ["Jump straight to hard questions", "Check syllabus & core concepts", "Skip notes completely", "Memorize without understanding"],
+          answer: 1,
+          explain: "Checking the syllabus and building core concepts gives structure before practice."
+        },
+        {
+          q: "2. How do PYQs help most in exam preparation?",
+          options: ["They replace all study material", "They show question patterns & difficulty level", "They guarantee exact repeat questions", "They are only useful in the last hour"],
+          answer: 1,
+          explain: "PYQs clarify exam patterns, recurring themes, and expected depth."
+        },
+        {
+          q: "3. After completing a mock test, what is most effective?",
+          options: ["Ignore the score", "Review every mistake and note the reason", "Take 5 more tests back-to-back without review", "Delete previous attempts"],
+          answer: 1,
+          explain: "Post-test review turns mistakes into permanent improvements."
+        }
+      ],
+      lectures: [
+        {
+          id: 1,
+          title: "Lecture 01: Complete Roadmap & Syllabus Breakdown",
+          instructor: "Faculty Team",
+          duration: "28 mins",
+          url: "https://example.com/lecture-1",
+          watched: false
+        },
+        {
+          id: 2,
+          title: "Lecture 02: High-Yield Concepts & PYQ Walkthrough",
+          instructor: "Faculty Team",
+          duration: "42 mins",
+          url: "https://example.com/lecture-2",
+          watched: false
+        }
+      ]
+    };
+
+    let state = loadState();
+    let mockAnswers = {};
+
+    function loadState() {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        return raw ? { ...defaultData, ...JSON.parse(raw) } : structuredClone(defaultData);
+      } catch {
+        return structuredClone(defaultData);
+      }
+    }
+
+    function saveState() {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+      updateSyllabusProgress();
+    }
+
+    // Tabs
+    document.querySelectorAll(".tab-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));
+        document.querySelectorAll(".panel").forEach((p) => p.classList.remove("active"));
+        btn.classList.add("active");
+        document.getElementById(btn.dataset.tab).classList.add("active");
+      });
+    });
+
+    // Syllabus
+    function updateSyllabusProgress() {
+      const total = state.syllabus.length;
+      const done = state.syllabus.filter((x) => x.done).length;
+      const pct = total ? Math.round((done / total) * 100) : 0;
+      document.getElementById("syllabusBar").style.width = pct + "%";
+      document.getElementById("overallProgressBadge").textContent = `Syllabus: ${pct}% Complete (${done}/${total})`;
+    }
+
+    function addSyllabusItem() {
+      const subject = document.getElementById("sylSubject").value.trim() || "General";
+      const topic = document.getElementById("sylTopic").value.trim();
+      if (!topic) return;
+      state.syllabus.push({ id: Date.now(), subject, topic, done: false });
+      document.getElementById("sylTopic").value = "";
+      saveState();
+      renderSyllabus();
+    }
+
+    function toggleSyllabusItem(id) {
+      const item = state.syllabus.find((x) => x.id === id);
+      if (item) {
+        item.done = !item.done;
+        saveState();
+        renderSyllabus();
+      }
+    }
+
+    function renderSyllabus() {
+      const el = document.getElementById("syllabusList");
+      el.innerHTML = state.syllabus
+        .map(
+          (item) => `
+          <div class="syllabus-row">
+            <div class="syllabus-left">
+              <input type="checkbox" ${item.done ? "checked" : ""} onchange="toggleSyllabusItem(${item.id})" />
+              <div>
+                <div style="font-weight:600; ${item.done ? "text-decoration:line-through; opacity:0.7;" : ""}">${escapeHtml(item.topic)}</div>
+                <div class="meta">${escapeHtml(item.subject)}</div>
+              </div>
+            </div>
+            <span class="meta">${item.done ? "Completed" : "Pending"}</span>
+          </div>`
+        )
+        .join("");
+      updateSyllabusProgress();
+    }
+
+    // Notes
+    function toggleNoteForm() {
+      const form = document.getElementById("noteForm");
+      form.style.display = form.style.display === "none" ? "grid" : "none";
+    }
+
+    function saveNote() {
+      const title = document.getElementById("noteTitle").value.trim();
+      const subject = document.getElementById("noteSubject").value.trim() || "General";
+      const content = document.getElementById("noteContent").value.trim();
+      if (!title || !content) return;
+      state.notes.unshift({ id: Date.now(), title, subject, content });
+      document.getElementById("noteTitle").value = "";
+      document.getElementById("noteContent").value = "";
+      toggleNoteForm();
+      saveState();
+      renderNotes();
+    }
+
+    function renderNotes() {
+      const q = (document.getElementById("noteSearch").value || "").toLowerCase();
+      const filtered = state.notes.filter(
+        (n) =>
+          n.title.toLowerCase().includes(q) ||
+          n.subject.toLowerCase().includes(q) ||
+          n.content.toLowerCase().includes(q)
       );
+      document.getElementById("notesGrid").innerHTML = filtered
+        .map(
+          (n) => `
+          <div class="item-card">
+            <div class="meta">${escapeHtml(n.subject)}</div>
+            <h3>${escapeHtml(n.title)}</h3>
+            <p style="color:#cbd5e1; font-size:0.92rem; line-height:1.45;">${escapeHtml(n.content)}</p>
+          </div>`
+        )
+        .join("");
     }
 
-    s.websiteZipUrl = fileLink.href;
-    await ctx.reply(
-      "Website ZIP link session mein save ho gaya. Ab /build ya /mergebuild likhein."
-    );
-  } catch (err) {
-    await ctx.reply(`ZIP link error: ${err.message}`);
-  }
-});
-
-// Direct URLs (APK link, Source ZIP link, Website ZIP link, ya Website URL)
-bot.on("text", async (ctx) => {
-  const text = ctx.message.text.trim();
-  if (!text || text.startsWith("/")) return;
-
-  if (!isHttpUrl(text)) {
-    return ctx.reply("Kripya valid https:// URL bhejein ya command likhein.");
-  }
-
-  const s = getSession(ctx.from.id);
-  const lower = text.toLowerCase();
-
-  const sizeBytes = await checkRemoteFileSize(text);
-  if (sizeBytes !== null && sizeBytes > MAX_FILE_BYTES) {
-    return ctx.reply(
-      `File size ${formatMB(sizeBytes)} hai, jo 1024 MB (1 GB) limit se zyada hai.`
-    );
-  }
-
-  if (lower.includes(".apk")) {
-    s.apkUrl = text;
-    const sizeText = sizeBytes ? ` (${formatMB(sizeBytes)})` : "";
-    return ctx.reply(
-      `Base APK URL save ho gaya${sizeText}.\nAb /source se source code nikal sakte hain, ya Website URL/ZIP bhej kar /build likh sakte hain.`
-    );
-  }
-
-  if (lower.includes(".zip")) {
-    const sizeText = sizeBytes ? ` (${formatMB(sizeBytes)})` : "";
-    if (lower.includes("source") || lower.includes("apk-source")) {
-      s.sourceZipUrl = text;
-      return ctx.reply(
-        `Source ZIP URL save ho gaya${sizeText}.\nAb website panel ZIP link bhej kar /mergebuild likhein.`
+    // PYQ
+    function renderPyqs() {
+      const year = document.getElementById("pyqYearFilter").value;
+      const subj = document.getElementById("pyqSubjectFilter").value;
+      const list = state.pyqs.filter(
+        (p) => (year === "ALL" || p.year === year) && (subj === "ALL" || p.subject === subj)
       );
+      document.getElementById("pyqList").innerHTML = list
+        .map(
+          (p) => `
+          <div class="item-card" style="margin-bottom:12px;">
+            <div class="meta">Year: ${escapeHtml(p.year)} • Subject: ${escapeHtml(p.subject)}</div>
+            <div style="font-weight:600;">${escapeHtml(p.question)}</div>
+            <div>
+              <button class="btn secondary" onclick="toggleSol('sol-${p.id}')">Show / Hide Solution</button>
+            </div>
+            <div id="sol-${p.id}" class="solution-box">${escapeHtml(p.solution)}</div>
+          </div>`
+        )
+        .join("");
     }
-    s.websiteZipUrl = text;
-    return ctx.reply(
-      `Website ZIP URL save ho gaya${sizeText}.\nAb /build ya /mergebuild likhein.`
-    );
-  }
 
-  s.websiteUrl = text;
-  return ctx.reply(
-    `Website URL save ho gaya:\n${text}\n\nAb /build likhein (agar APK URL bhi save kar chuke hain).`
-  );
-});
+    function toggleSol(id) {
+      const box = document.getElementById(id);
+      box.style.display = box.style.display === "block" ? "none" : "block";
+    }
 
-bot.command("source", async (ctx) => {
-  const s = getSession(ctx.from.id);
-  if (!s.apkUrl) {
-    return ctx.reply(
-      "Pehle .apk file ka direct https:// link bhejein, phir /source likhein."
-    );
-  }
+    // Mock Test
+    function selectOption(qIdx, optIdx) {
+      mockAnswers[qIdx] = optIdx;
+      renderMockTest();
+    }
 
-  const tagName = `source-${ctx.from.id}-${Date.now()}`;
-  await ctx.reply("APK source code extraction trigger kiya ja raha hai...");
+    function resetMockTest() {
+      mockAnswers = {};
+      renderMockTest();
+    }
 
-  try {
-    await dispatchWorkflow(SOURCE_WORKFLOW_FILE, {
-      apk_url: s.apkUrl,
-      tag_name: tagName,
-    });
+    function renderMockTest() {
+      let score = 0;
+      state.mockQuestions.forEach((item, idx) => {
+        if (mockAnswers[idx] === item.answer) score++;
+      });
+      document.getElementById("mockScoreBadge").textContent =
+        `Score: ${score} / ${state.mockQuestions.length}`;
 
-    await ctx.reply(
-      [
-        "Source extraction workflow trigger ho gaya!",
-        `Tag: ${tagName}`,
-        "GitHub Releases mein `apk-source-code.zip` banne ke baad uska link bhej kar /mergebuild use karein.",
-      ].join("\n")
-    );
-  } catch (err) {
-    console.error("SOURCE_COMMAND_ERROR:", err);
-    await ctx.reply(`Source error: ${err.message}`);
-  }
-});
+      document.getElementById("mockContainer").innerHTML = state.mockQuestions
+        .map((item, qIdx) => {
+          const picked = mockAnswers[qIdx];
+          const answered = picked !== undefined;
+          return `
+            <div class="item-card" style="margin-bottom:14px;">
+              <div style="font-weight:600;">${escapeHtml(item.q)}</div>
+              ${item.options
+                .map((opt, oIdx) => {
+                  let cls = "option-btn";
+                  if (answered) {
+                    if (oIdx === item.answer) cls += " correct";
+                    else if (oIdx === picked) cls += " wrong";
+                  }
+                  return `<button class="${cls}" onclick="selectOption(${qIdx}, ${oIdx})">${escapeHtml(opt)}</button>`;
+                })
+                .join("")}
+              ${
+                answered
+                  ? `<div class="solution-box" style="display:block;"><strong>Explanation:</strong> ${escapeHtml(item.explain)}</div>`
+                  : ""
+              }
+            </div>`;
+        })
+        .join("");
+    }
 
-bot.command("mergebuild", async (ctx) => {
-  const s = getSession(ctx.from.id);
-  if (!s.sourceZipUrl) {
-    return ctx.reply("Pehle extracted source code ZIP ka https:// link bhejein.");
-  }
-  if (!s.websiteZipUrl) {
-    return ctx.reply("Pehle website panel ki .zip file ya https:// link bhejein.");
-  }
+    // Lectures
+    function toggleLectureWatched(id) {
+      const lec = state.lectures.find((l) => l.id === id);
+      if (lec) {
+        lec.watched = !lec.watched;
+        saveState();
+        renderLectures();
+      }
+    }
 
-  const tagName = `merged-${ctx.from.id}-${Date.now()}`;
-  await ctx.reply("Source + Website Panel merge aur APK build start ho raha hai...");
+    function renderLectures() {
+      const q = (document.getElementById("lectureSearch").value || "").toLowerCase();
+      const filtered = state.lectures.filter(
+        (l) => l.title.toLowerCase().includes(q) || l.instructor.toLowerCase().includes(q)
+      );
+      document.getElementById("lecturesGrid").innerHTML = filtered
+        .map(
+          (l) => `
+          <div class="item-card">
+            <div class="meta">${escapeHtml(l.instructor)} • ${escapeHtml(l.duration)}</div>
+            <h3>${escapeHtml(l.title)}</h3>
+            <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:auto;">
+              <a href="${escapeAttr(l.url)}" target="_blank" rel="noopener" class="btn" style="text-decoration:none;">Open Lecture</a>
+              <button class="btn secondary" onclick="toggleLectureWatched(${l.id})">${l.watched ? "Watched ✓" : "Mark Watched"}</button>
+            </div>
+          </div>`
+        )
+        .join("");
+    }
 
-  try {
-    await dispatchWorkflow(MERGE_WORKFLOW_FILE, {
-      source_zip_url: s.sourceZipUrl,
-      panel_zip_url: s.websiteZipUrl,
-      tag_name: tagName,
-    });
+    function escapeHtml(str) {
+      return String(str).replace(/[&<>"']/g, (m) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;"
+      }[m]));
+    }
 
-    await ctx.reply(
-      [
-        "Merge & Build workflow start ho gaya!",
-        `Tag: ${tagName}`,
-        "GitHub Releases mein `merged-panel-app.apk` banne ke baad download kar lein.",
-      ].join("\n")
-    );
-  } catch (err) {
-    console.error("MERGEBUILD_COMMAND_ERROR:", err);
-    await ctx.reply(`Merge build error: ${err.message}`);
-  }
-});
+    function escapeAttr(str) {
+      const s = String(str).trim();
+      return /^https?:\/\//i.test(s) ? escapeHtml(s) : "#";
+    }
 
-bot.command("build", async (ctx) => {
-  const s = getSession(ctx.from.id);
-
-  if (!s.apkUrl) {
-    return ctx.reply("Pehle base .apk ka direct https:// link bhejein.");
-  }
-  if (!s.websiteUrl && !s.websiteZipUrl) {
-    return ctx.reply("Pehle Website URL ya Website ZIP link/file bhejein.");
-  }
-
-  const tagName = `build-${ctx.from.id}-${Date.now()}`;
-  await ctx.reply("GitHub Actions workflow trigger ho raha hai...");
-
-  try {
-    await dispatchWorkflow(WORKFLOW_FILE, {
-      apk_url: s.apkUrl,
-      website_url: s.websiteUrl || "",
-      website_zip_url: s.websiteZipUrl || "",
-      tag_name: tagName,
-    });
-
-    await ctx.reply(
-      [
-        "Build workflow start ho gaya hai!",
-        `Tag: ${tagName}`,
-        "GitHub repository ke Actions / Releases tab mein progress aur final APK dekhein.",
-      ].join("\n")
-    );
-  } catch (err) {
-    console.error("BUILD_COMMAND_ERROR:", err);
-    await ctx.reply(`Build trigger fail hua:\n${err.message}`);
-  }
-});
-
-bot
-  .launch()
-  .then(() => {
-    console.log("Telegram bot chal raha hai...");
-  })
-  .catch((err) => {
-    console.error("Bot launch error:", err);
-    process.exit(1);
-  });
-
-process.once("SIGINT", () => bot.stop("SIGINT"));
-process.once("SIGTERM", () => bot.stop("SIGTERM"));
+    renderSyllabus();
+    renderNotes();
+    renderPyqs();
+    renderMockTest();
+    renderLectures();
+  </script>
+</body>
+</html>
