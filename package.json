@@ -1,10 +1,13 @@
 {
-  "name": "apk-website-builder-bot",
+  "name": "any-cousre-bot",
   "version": "1.0.0",
-  "description": "Telegram bot to package website assets/URL with an APK and output a signed APK",
+  "description": "Telegram bot for APK source extraction, panel merging, and build workflows via GitHub Actions",
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   },
   "dependencies": {
     "telegraf": "^4.16.3"
