@@ -1,4 +1,4 @@
-const http = requiconst http = require("http");
+const http = require("http");
 const { Telegraf, Markup } = require("telegraf");
 const { PDFDocument } = require("pdf-lib");
 
