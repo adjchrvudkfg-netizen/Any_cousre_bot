@@ -1,4 +1,4 @@
-const http = require("http");
+const http = requiconst http = require("http");
 const { Telegraf, Markup } = require("telegraf");
 const { PDFDocument } = require("pdf-lib");
 
@@ -49,7 +49,6 @@ http
   .listen(PORT, () => {
     console.log(`HTTP server listening on port ${PORT}`);
   });
-
 function isAdmin(userId) {
   if (!ADMIN_IDS.length) return true;
   return ADMIN_IDS.includes(Number(userId));
@@ -61,14 +60,19 @@ async function mergeFilesToSinglePdf(items) {
   for (const item of items) {
     const res = await fetch(item.url);
     if (!res.ok) {
-      throw new Error(`File download fail (${res.status}): ${item.name || "file"}`);
+      throw new Error(
+        `File download fail (${res.status}): ${item.name || "file"}`
+      );
     }
     const bytes = new Uint8Array(await res.arrayBuffer());
     const lowerName = (item.name || "").toLowerCase();
     const isPdf =
       item.mime === "application/pdf" ||
       lowerName.endsWith(".pdf") ||
-      (bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46);
+      (bytes[0] === 0x25 &&
+        bytes[1] === 0x50 &&
+        bytes[2] === 0x44 &&
+        bytes[3] === 0x46);
 
     if (isPdf) {
       const srcPdf = await PDFDocument.load(bytes);
@@ -97,6 +101,7 @@ async function mergeFilesToSinglePdf(items) {
 
   return Buffer.from(await mergedPdf.save());
 }
+
 async function askGemini(prompt) {
   if (!GEMINI_API_KEY) {
     throw new Error("GEMINI_API_KEY environment variable missing hai.");
@@ -134,14 +139,12 @@ async function askGemini(prompt) {
   }
   return text;
 }
-
-// studyStore[subjIdx][unitIdx] = { notesText, noteFiles: [], syllabusText, lectures: [] }
 const studyStore = SUBJECTS.map(() =>
   DEFAULT_UNITS.map(() => ({
     notesText: "",
-    noteFiles: [], // { name, url, mime }
+    noteFiles: [],
     syllabusText: "",
-    lectures: [], // { title, youtubeUrl, videoFileId }
+    lectures: [],
   }))
 );
 
@@ -160,18 +163,33 @@ function getUnitData(subjIdx, unitIdx) {
 
 const sessions = new Map();
 
+function createFreshSession() {
+  return {
+    mock: null,
+    pendingMockSubject: null,
+    activeSubj: 0,
+    activeUnit: 0,
+    awaitingLectureVideoFor: null,
+    awaitingYoutubeFor: null,
+    apkUrl: "",
+    sourceZipUrl: "",
+    websiteZipUrl: "",
+    websiteUrl: "",
+  };
+}
+
 function getSession(userId) {
   if (!sessions.has(userId)) {
-    sessions.set(userId, {
-      mock: null,
-      pendingMockSubject: null,
-      activeSubj: 0,
-      activeUnit: 0,
-      awaitingLectureVideoFor: null, // { subjIdx, unitIdx, lecIdx }
-      awaitingYoutubeFor: null, // { subjIdx, unitIdx, lecIdx }
-    });
+    sessions.set(userId, createFreshSession());
   }
-  return sessions.get(userId);
+  const s = sessions.get(userId);
+  if (!("mock" in s)) s.mock = null;
+  if (!("pendingMockSubject" in s)) s.pendingMockSubject = null;
+  if (!("activeSubj" in s)) s.activeSubj = 0;
+  if (!("activeUnit" in s)) s.activeUnit = 0;
+  if (!("awaitingLectureVideoFor" in s)) s.awaitingLectureVideoFor = null;
+  if (!("awaitingYoutubeFor" in s)) s.awaitingYoutubeFor = null;
+  return s;
 }
 
 async function replacePage(ctx, text, extra = {}) {
@@ -191,10 +209,6 @@ function isHttpUrl(str) {
   } catch {
     return false;
   }
-}
-
-function isYoutubeUrl(str) {
-  return /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\//i.test(str.trim());
 }
 
 async function checkRemoteFileSize(url) {
@@ -401,8 +415,23 @@ function parseSubjAndUnit(rawSubj, rawUnit) {
   return { sIdx, uIdx };
 }
 
+bot.start(async (ctx) => {
+  sessions.set(ctx.from.id, createFreshSession());
+  await ctx
+    .reply("Loading STUDY BOT...", Markup.removeKeyboard())
+    .catch(() => {});
+  await ctx.reply(buildStartMessage(ctx), inlineMenuKeyboard());
+});
+
+bot.action("back_main", async (ctx) => {
+  await ctx.answerCbQuery();
+  await replacePage(ctx, buildStartMessage(ctx), inlineMenuKeyboard());
+});
+
 bot.command("addnotes", async (ctx) => {
-  if (!isAdmin(ctx.from.id)) return ctx.reply("Sirf admin hi notes add kar sakta hai.");
+  if (!isAdmin(ctx.from.id)) {
+    return ctx.reply("Sirf admin hi notes add kar sakta hai.");
+  }
   const payload = ctx.message.text.replace(/^\/addnotes\s*/i, "");
   const parts = payload.split("|").map((p) => p.trim());
   if (parts.length < 3) {
@@ -415,7 +444,9 @@ bot.command("addnotes", async (ctx) => {
     const { sIdx, uIdx } = parseSubjAndUnit(parts[0], parts[1]);
     const noteBody = parts.slice(2).join(" | ");
     const uData = getUnitData(sIdx, uIdx);
-    uData.notesText = uData.notesText ? `${uData.notesText}\n\n${noteBody}` : noteBody;
+    uData.notesText = uData.notesText
+      ? `${uData.notesText}\n\n${noteBody}`
+      : noteBody;
 
     const s = getSession(ctx.from.id);
     s.activeSubj = sIdx;
@@ -430,7 +461,9 @@ bot.command("addnotes", async (ctx) => {
 });
 
 bot.command("addsyllabus", async (ctx) => {
-  if (!isAdmin(ctx.from.id)) return ctx.reply("Sirf admin hi syllabus add kar sakta hai.");
+  if (!isAdmin(ctx.from.id)) {
+    return ctx.reply("Sirf admin hi syllabus add kar sakta hai.");
+  }
   const payload = ctx.message.text.replace(/^\/addsyllabus\s*/i, "");
   const parts = payload.split("|").map((p) => p.trim());
   if (parts.length < 3) {
@@ -454,7 +487,9 @@ bot.command("addsyllabus", async (ctx) => {
 });
 
 bot.command("addlecture", async (ctx) => {
-  if (!isAdmin(ctx.from.id)) return ctx.reply("Sirf admin hi lecture add kar sakta hai.");
+  if (!isAdmin(ctx.from.id)) {
+    return ctx.reply("Sirf admin hi lecture add kar sakta hai.");
+  }
   const payload = ctx.message.text.replace(/^\/addlecture\s*/i, "");
   const parts = payload.split("|").map((p) => p.trim());
   if (parts.length < 3) {
@@ -506,7 +541,9 @@ async function mergeAndSendUnitNotes(ctx, sIdx, uIdx) {
   );
 
   const mergedBuf = await mergeFilesToSinglePdf(uData.noteFiles);
-  const fileName = `${SUBJECTS[sIdx].replace(/[^a-zA-Z0-9]+/g, "_")}_${DEFAULT_UNITS[uIdx].replace(/\s+/g, "_")}_Notes.pdf`;
+  const fileName = `${SUBJECTS[sIdx].replace(/[^a-zA-Z0-9]+/g, "_")}_${DEFAULT_UNITS[
+    uIdx
+  ].replace(/\s+/g, "_")}_Notes.pdf`;
 
   await ctx.replyWithDocument(
     { source: mergedBuf, filename: fileName },
@@ -542,30 +579,6 @@ bot.command("mergenotes", async (ctx) => {
     await ctx.reply(`Merge notes error: ${err.message}`);
   }
 });
-bot.start(async (ctx) => {
-  sessions.set(ctx.from.id, {
-    mock: null,
-    pendingMockSubject: null,
-    activeSubj: 0,
-    activeUnit: 0,
-    awaitingLectureVideoFor: null,
-    awaitingYoutubeFor: null,
-  });
-  await replacePage(ctx, buildStartMessage(ctx), {
-    ...inlineMenuKeyboard(),
-    reply_markup: {
-      ...inlineMenuKeyboard().reply_markup,
-      remove_keyboard: true,
-    },
-  });
-});
-
-bot.action("back_main", async (ctx) => {
-  await ctx.answerCbQuery();
-  await replacePage(ctx, buildStartMessage(ctx), inlineMenuKeyboard());
-});
-
-// Notes -> Subjects -> Units -> View Notes + Single Merged PDF
 bot.action("menu_notes", async (ctx) => {
   await ctx.answerCbQuery();
   await replacePage(
@@ -575,7 +588,6 @@ bot.action("menu_notes", async (ctx) => {
   );
 });
 
-// Syllabus -> Subjects -> Units
 bot.action("menu_syllabus", async (ctx) => {
   await ctx.answerCbQuery();
   await replacePage(
@@ -585,7 +597,6 @@ bot.action("menu_syllabus", async (ctx) => {
   );
 });
 
-// Lecture -> Subjects -> Units -> Dynamic Lectures
 bot.action("menu_lecture", async (ctx) => {
   await ctx.answerCbQuery();
   await replacePage(
@@ -595,7 +606,6 @@ bot.action("menu_lecture", async (ctx) => {
   );
 });
 
-// PYQ -> Subjects -> Past Exam PYQs Only
 bot.action("menu_pyq", async (ctx) => {
   await ctx.answerCbQuery();
   await replacePage(
@@ -799,7 +809,9 @@ for (let i = 0; i < SUBJECTS.length; i++) {
 
       bot.action(`set_yt_${i}_${u}_${l}`, async (ctx) => {
         await ctx.answerCbQuery();
-        if (!isAdmin(ctx.from.id)) return ctx.reply("Sirf admin hi YouTube link set kar sakta hai.");
+        if (!isAdmin(ctx.from.id)) {
+          return ctx.reply("Sirf admin hi YouTube link set kar sakta hai.");
+        }
         const s = getSession(ctx.from.id);
         s.awaitingYoutubeFor = { subjIdx: i, unitIdx: u, lecIdx: l };
         s.awaitingLectureVideoFor = null;
@@ -810,7 +822,9 @@ for (let i = 0; i < SUBJECTS.length; i++) {
 
       bot.action(`set_vid_${i}_${u}_${l}`, async (ctx) => {
         await ctx.answerCbQuery();
-        if (!isAdmin(ctx.from.id)) return ctx.reply("Sirf admin hi video upload kar sakta hai.");
+        if (!isAdmin(ctx.from.id)) {
+          return ctx.reply("Sirf admin hi video upload kar sakta hai.");
+        }
         const s = getSession(ctx.from.id);
         s.awaitingLectureVideoFor = { subjIdx: i, unitIdx: u, lecIdx: l };
         s.awaitingYoutubeFor = null;
@@ -1114,14 +1128,7 @@ for (let qIdx = 0; qIdx < 80; qIdx++) {
   });
 }
 bot.command("reset", async (ctx) => {
-  sessions.set(ctx.from.id, {
-    mock: null,
-    pendingMockSubject: null,
-    activeSubj: 0,
-    activeUnit: 0,
-    awaitingLectureVideoFor: null,
-    awaitingYoutubeFor: null,
-  });
+  sessions.set(ctx.from.id, createFreshSession());
   await ctx.reply(
     "STUDY BOT session reset ho gaya. Naye links ya files bhejein.",
     inlineMenuKeyboard()
@@ -1147,7 +1154,6 @@ bot.command("status", async (ctx) => {
   );
 });
 
-// Admin photo upload -> current active subject/unit ke notes mein add (merge ready)
 bot.on("photo", async (ctx) => {
   const s = getSession(ctx.from.id);
   if (!isAdmin(ctx.from.id)) return;
@@ -1172,7 +1178,6 @@ bot.on("photo", async (ctx) => {
   }
 });
 
-// Admin video upload -> selected lecture mein video update
 bot.on("video", async (ctx) => {
   const s = getSession(ctx.from.id);
   if (!isAdmin(ctx.from.id)) return;
@@ -1202,7 +1207,6 @@ bot.on("document", async (ctx) => {
   const fileName = (doc.file_name || "").toLowerCase();
   const s = getSession(ctx.from.id);
 
-  // Admin lecture video uploaded as document
   if (s.awaitingLectureVideoFor && isAdmin(ctx.from.id)) {
     const target = s.awaitingLectureVideoFor;
     const uData = getUnitData(target.subjIdx, target.unitIdx);
@@ -1217,7 +1221,6 @@ bot.on("document", async (ctx) => {
     }
   }
 
-  // Admin PDF upload -> current active subject/unit ke notes mein add (merge ready)
   if (fileName.endsWith(".pdf") && isAdmin(ctx.from.id)) {
     try {
       const fileLink = await ctx.telegram.getFileLink(doc.file_id);
@@ -1272,7 +1275,6 @@ bot.on("text", async (ctx) => {
 
   const s = getSession(ctx.from.id);
 
-  // Admin awaiting YouTube link for a specific lecture
   if (s.awaitingYoutubeFor && isAdmin(ctx.from.id)) {
     if (!isHttpUrl(text)) {
       return ctx.reply("Kripya valid YouTube https:// link bhejein.");
@@ -1339,7 +1341,9 @@ bot.command("source", async (ctx) => {
   }
 
   const tagName = `source-${ctx.from.id}-${Date.now()}`;
-  await ctx.reply("STUDY BOT APK source code extraction trigger kiya ja raha hai...");
+  await ctx.reply(
+    "STUDY BOT APK source code extraction trigger kiya ja raha hai..."
+  );
 
   try {
     await dispatchWorkflow(SOURCE_WORKFLOW_FILE, {
