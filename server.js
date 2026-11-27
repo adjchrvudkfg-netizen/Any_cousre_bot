@@ -91,12 +91,19 @@ async function dispatchWorkflow(workflowFile, inputs) {
   }
 }
 
-function mainMenuKeyboard() {
-  return Markup.keyboard([
-    ["Notes"],
-    ["Syllabus", "PYQ"],
-    ["Mock Test", "Lecture"],
-  ]).resize();
+// Message ke turant neeche ("Tap any button below to begin.") dikhne wale Inline Buttons
+function inlineMenuKeyboard() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback("📝 Notes", "menu_notes")],
+    [
+      Markup.button.callback("📖 Syllabus", "menu_syllabus"),
+      Markup.button.callback("📄 PYQ", "menu_pyq"),
+    ],
+    [
+      Markup.button.callback("🧪 Mock Test", "menu_mock"),
+      Markup.button.callback("🎥 Lecture", "menu_lecture"),
+    ],
+  ]);
 }
 
 function buildStartMessage(ctx) {
@@ -134,12 +141,7 @@ bot.catch(async (err, ctx) => {
   } catch (_) {}
 });
 
-bot.start(async (ctx) => {
-  sessions.set(ctx.from.id, {});
-  await ctx.reply(buildStartMessage(ctx), mainMenuKeyboard());
-});
-
-bot.hears("Notes", async (ctx) => {
+async function sendNotes(ctx) {
   await ctx.reply(
     [
       "📝 *Study Notes*",
@@ -149,11 +151,11 @@ bot.hears("Notes", async (ctx) => {
       "",
       "Apne notes topic ya link bhejein, ya /status se session check karein.",
     ].join("\n"),
-    mainMenuKeyboard()
+    inlineMenuKeyboard()
   );
-});
+}
 
-bot.hears("Syllabus", async (ctx) => {
+async function sendSyllabus(ctx) {
   await ctx.reply(
     [
       "📖 *Study Syllabus*",
@@ -163,11 +165,11 @@ bot.hears("Syllabus", async (ctx) => {
       "",
       "Kisi subject ka syllabus dekhna hai to uska naam likhein.",
     ].join("\n"),
-    mainMenuKeyboard()
+    inlineMenuKeyboard()
   );
-});
+}
 
-bot.hears("PYQ", async (ctx) => {
+async function sendPyq(ctx) {
   await ctx.reply(
     [
       "📄 *Study PYQ (Previous Year Questions)*",
@@ -177,11 +179,11 @@ bot.hears("PYQ", async (ctx) => {
       "",
       "Year ya topic likh kar PYQ filter kar sakte hain.",
     ].join("\n"),
-    mainMenuKeyboard()
+    inlineMenuKeyboard()
   );
-});
+}
 
-bot.hears("Mock Test", async (ctx) => {
+async function sendMockTest(ctx) {
   await ctx.reply(
     [
       "🧪 *Study Mock Test*",
@@ -191,11 +193,11 @@ bot.hears("Mock Test", async (ctx) => {
       "",
       "Test shuru karne ke liye topic ya set naam bhejein.",
     ].join("\n"),
-    mainMenuKeyboard()
+    inlineMenuKeyboard()
   );
-});
+}
 
-bot.hears("Lecture", async (ctx) => {
+async function sendLecture(ctx) {
   await ctx.reply(
     [
       "🎥 *Study Lecture*",
@@ -205,13 +207,59 @@ bot.hears("Lecture", async (ctx) => {
       "",
       "Lecture ka topic ya link bhejein.",
     ].join("\n"),
-    mainMenuKeyboard()
+    inlineMenuKeyboard()
   );
+}
+
+bot.start(async (ctx) => {
+  sessions.set(ctx.from.id, {});
+  // Purana bottom reply keyboard hata kar inline menu message ke saath bhejega
+  await ctx.reply(buildStartMessage(ctx), {
+    ...inlineMenuKeyboard(),
+    reply_markup: {
+      ...inlineMenuKeyboard().reply_markup,
+      remove_keyboard: true,
+    },
+  });
 });
+
+bot.action("menu_notes", async (ctx) => {
+  await ctx.answerCbQuery();
+  await sendNotes(ctx);
+});
+
+bot.action("menu_syllabus", async (ctx) => {
+  await ctx.answerCbQuery();
+  await sendSyllabus(ctx);
+});
+
+bot.action("menu_pyq", async (ctx) => {
+  await ctx.answerCbQuery();
+  await sendPyq(ctx);
+});
+
+bot.action("menu_mock", async (ctx) => {
+  await ctx.answerCbQuery();
+  await sendMockTest(ctx);
+});
+
+bot.action("menu_lecture", async (ctx) => {
+  await ctx.answerCbQuery();
+  await sendLecture(ctx);
+});
+
+bot.hears(["Notes", "📝 Notes"], sendNotes);
+bot.hears(["Syllabus", "📖 Syllabus"], sendSyllabus);
+bot.hears(["PYQ", "📄 PYQ"], sendPyq);
+bot.hears(["Mock Test", "🧪 Mock Test"], sendMockTest);
+bot.hears(["Lecture", "🎥 Lecture"], sendLecture);
 
 bot.command("reset", async (ctx) => {
   sessions.set(ctx.from.id, {});
-  await ctx.reply("Study session reset ho gaya. Naye links ya files bhejein.", mainMenuKeyboard());
+  await ctx.reply(
+    "Study session reset ho gaya. Naye links ya files bhejein.",
+    inlineMenuKeyboard()
+  );
 });
 
 bot.command("status", async (ctx) => {
@@ -224,7 +272,7 @@ bot.command("status", async (ctx) => {
       `• Website ZIP URL: ${s.websiteZipUrl || "Not provided"}`,
       `• Website URL: ${s.websiteUrl || "Not provided"}`,
     ].join("\n"),
-    mainMenuKeyboard()
+    inlineMenuKeyboard()
   );
 });
 
