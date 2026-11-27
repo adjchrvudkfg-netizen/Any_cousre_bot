@@ -30,7 +30,6 @@ http
   .listen(PORT, () => {
     console.log(`HTTP server listening on port ${PORT}`);
   });
-
 const sessions = new Map();
 
 function getSession(userId) {
@@ -91,7 +90,6 @@ async function dispatchWorkflow(workflowFile, inputs) {
   }
 }
 
-// Message ke turant neeche ("Tap any button below to begin.") dikhne wale Inline Buttons
 function inlineMenuKeyboard() {
   return Markup.inlineKeyboard([
     [Markup.button.callback("📝 Notes", "menu_notes")],
@@ -213,7 +211,6 @@ async function sendLecture(ctx) {
 
 bot.start(async (ctx) => {
   sessions.set(ctx.from.id, {});
-  // Purana bottom reply keyboard hata kar inline menu message ke saath bhejega
   await ctx.reply(buildStartMessage(ctx), {
     ...inlineMenuKeyboard(),
     reply_markup: {
@@ -253,7 +250,6 @@ bot.hears(["Syllabus", "📖 Syllabus"], sendSyllabus);
 bot.hears(["PYQ", "📄 PYQ"], sendPyq);
 bot.hears(["Mock Test", "🧪 Mock Test"], sendMockTest);
 bot.hears(["Lecture", "🎥 Lecture"], sendLecture);
-
 bot.command("reset", async (ctx) => {
   sessions.set(ctx.from.id, {});
   await ctx.reply(
