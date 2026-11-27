@@ -108,37 +108,49 @@ async function askGemini(prompt) {
     throw new Error("GEMINI_API_KEY environment variable missing hai.");
   }
 
+  const modelName = (GEMINI_MODEL || "gemini-3.8-flash")
+    .trim()
+    .replace(/^models\//i, "");
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
-    GEMINI_MODEL
+    modelName
   )}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: {
-        temperature: 0.35,
-      },
-    }),
-  });
+  const maxAttempts = 5;
 
-  if (!res.ok) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+      }),
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      const text =
+        data?.candidates?.[0]?.content?.parts
+          ?.map((p) => p.text || "")
+          .join("")
+          .trim() || "";
+
+      if (!text) {
+        throw new Error("Gemini se empty response aaya.");
+      }
+      return text;
+    }
+
     const errText = await res.text();
-    throw new Error(`Gemini API error (${res.status}): ${errText}`);
-  }
+    const isTransient =
+      res.status === 503 || res.status === 429 || res.status >= 500;
 
-  const data = await res.json();
-  const text =
-    data?.candidates?.[0]?.content?.parts
-      ?.map((p) => p.text || "")
-      .join("")
-      .trim() || "";
+    if (!isTransient || attempt === maxAttempts) {
+      throw new Error(`Gemini API error (${res.status}): ${errText}`);
+    }
 
-  if (!text) {
-    throw new Error("Gemini se empty response aaya.");
+    const waitMs = attempt * 2500;
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
   }
-  return text;
 }
 
 const studyStore = SUBJECTS.map(() =>
