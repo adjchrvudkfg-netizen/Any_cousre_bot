@@ -1812,15 +1812,21 @@ bot.use(async (ctx, next) => {
     );
   }
 });
-bot
-  .launch({ dropPendingUpdates: true })
-  .then(() => {
+async function startBotWithRetry(attempt = 1) {
+  try {
+    await bot.launch({ dropPendingUpdates: true });
     console.log("STUDY BOT chal raha hai...");
-  })
-  .catch((err) => {
-    console.error("Bot launch error:", err);
-    process.exit(1);
-  });
+  } catch (err) {
+    const delayMs = Math.min(30000, attempt * 5000);
+    console.error(
+      `Bot launch error (attempt ${attempt}, retrying in ${delayMs / 1000}s):`,
+      err?.code || err?.message || err
+    );
+    setTimeout(() => startBotWithRetry(attempt + 1), delayMs);
+  }
+}
+
+startBotWithRetry();
 
 process.once("SIGINT", () => bot.stop("SIGINT"));
 process.once("SIGTERM", () => bot.stop("SIGTERM"));
