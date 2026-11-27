@@ -41,6 +41,8 @@ if (!BOT_TOKEN) {
   process.exit(1);
 }
 
+const bot = new Telegraf(BOT_TOKEN);
+
 http
   .createServer((req, res) => {
     res.writeHead(200, { "Content-Type": "text/plain" });
@@ -139,7 +141,6 @@ async function askGemini(prompt) {
   return text;
 }
 
-// Har Subject -> Unit ke alag Notes (text + files) aur Syllabus (text + files)
 const studyStore = SUBJECTS.map(() =>
   DEFAULT_UNITS.map(() => ({
     notesText: "",
@@ -181,7 +182,7 @@ function createFreshSession() {
     pendingMockSubject: null,
     activeSubj: 0,
     activeUnit: 0,
-    uploadTargetType: "notes", // "notes" | "syllabus"
+    uploadTargetType: "notes",
     awaitingLectureVideoFor: null,
     awaitingYoutubeFor: null,
     apkUrl: "",
@@ -549,6 +550,7 @@ async function handleAdminTextCommand(ctx, text) {
     return true;
   }
 
+  // --- NOTES ADD / UPDATE / DELETE ---
   if (text.startsWith("/addnotes")) {
     if (!isAdmin(ctx.from?.id)) {
       await ctx.reply("Sirf admin hi notes add kar sakta hai.");
@@ -558,7 +560,7 @@ async function handleAdminTextCommand(ctx, text) {
     const parts = payload.split("|").map((p) => p.trim());
     if (parts.length < 2) {
       await ctx.reply(
-        "Format: /addnotes <subj_1_to_6> | <unit_1_to_5> | <optional notes text>\n(Notes text na bhi likhein to target Subject+Unit set ho jayega aur aap jitni chahein PDF/Photo bhej sakte hain)"
+        "Format: /addnotes <subj_1_to_6> | <unit_1_to_5> | <optional notes text>"
       );
       return true;
     }
@@ -586,6 +588,69 @@ async function handleAdminTextCommand(ctx, text) {
     return true;
   }
 
+  if (text.startsWith("/updatenotes")) {
+    if (!isAdmin(ctx.from?.id)) {
+      await ctx.reply("Sirf admin hi notes update kar sakta hai.");
+      return true;
+    }
+    const payload = text.replace(/^\/updatenotes\s*/i, "").trim();
+    const parts = payload.split("|").map((p) => p.trim());
+    if (parts.length < 3) {
+      await ctx.reply(
+        "Format: /updatenotes <subj_1_to_6> | <unit_1_to_5> | <new notes text>"
+      );
+      return true;
+    }
+    try {
+      const { sIdx, uIdx } = parseSubjAndUnit(parts[0], parts[1]);
+      const newText = parts.slice(2).join(" | ").trim();
+      const uData = getUnitData(sIdx, uIdx);
+      uData.notesText = newText;
+      await ctx.reply(
+        `🔵 Notes text replace/update ho gaya!\nSubject: ${SUBJECTS[sIdx]} • ${DEFAULT_UNITS[uIdx]}`
+      );
+    } catch (err) {
+      await ctx.reply(`Update notes error: ${err.message}`);
+    }
+    return true;
+  }
+
+  if (text.startsWith("/deletenotes")) {
+    if (!isAdmin(ctx.from?.id)) {
+      await ctx.reply("Sirf admin hi notes delete kar sakta hai.");
+      return true;
+    }
+    const payload = text.replace(/^\/deletenotes\s*/i, "").trim();
+    const parts = payload.split("|").map((p) => p.trim());
+    if (parts.length < 2) {
+      await ctx.reply(
+        "Format: /deletenotes <subj_1_to_6> | <unit_1_to_5> | [all | text | files]"
+      );
+      return true;
+    }
+    try {
+      const { sIdx, uIdx } = parseSubjAndUnit(parts[0], parts[1]);
+      const mode = (parts[2] || "all").toLowerCase();
+      const uData = getUnitData(sIdx, uIdx);
+
+      if (mode === "text") {
+        uData.notesText = "";
+      } else if (mode === "files") {
+        uData.noteFiles = [];
+      } else {
+        uData.notesText = "";
+        uData.noteFiles = [];
+      }
+      await ctx.reply(
+        `🔵 Notes (${mode}) delete ho gaye!\nSubject: ${SUBJECTS[sIdx]} • ${DEFAULT_UNITS[uIdx]}`
+      );
+    } catch (err) {
+      await ctx.reply(`Delete notes error: ${err.message}`);
+    }
+    return true;
+  }
+
+  // --- SYLLABUS ADD / UPDATE / DELETE ---
   if (text.startsWith("/addsyllabus")) {
     if (!isAdmin(ctx.from?.id)) {
       await ctx.reply("Sirf admin hi syllabus add kar sakta hai.");
@@ -604,7 +669,9 @@ async function handleAdminTextCommand(ctx, text) {
       const sylBody = parts.slice(2).join(" | ").trim();
       const uData = getUnitData(sIdx, uIdx);
       if (sylBody) {
-        uData.syllabusText = sylBody;
+        uData.syllabusText = uData.syllabusText
+          ? `${uData.syllabusText}\n\n${sylBody}`
+          : sylBody;
       }
 
       const s = getSession(ctx.from?.id);
@@ -621,6 +688,69 @@ async function handleAdminTextCommand(ctx, text) {
     return true;
   }
 
+  if (text.startsWith("/updatesyllabus")) {
+    if (!isAdmin(ctx.from?.id)) {
+      await ctx.reply("Sirf admin hi syllabus update kar sakta hai.");
+      return true;
+    }
+    const payload = text.replace(/^\/updatesyllabus\s*/i, "").trim();
+    const parts = payload.split("|").map((p) => p.trim());
+    if (parts.length < 3) {
+      await ctx.reply(
+        "Format: /updatesyllabus <subj_1_to_6> | <unit_1_to_5> | <new syllabus text>"
+      );
+      return true;
+    }
+    try {
+      const { sIdx, uIdx } = parseSubjAndUnit(parts[0], parts[1]);
+      const newText = parts.slice(2).join(" | ").trim();
+      const uData = getUnitData(sIdx, uIdx);
+      uData.syllabusText = newText;
+      await ctx.reply(
+        `🟢 Syllabus update ho gaya!\nSubject: ${SUBJECTS[sIdx]} • ${DEFAULT_UNITS[uIdx]}`
+      );
+    } catch (err) {
+      await ctx.reply(`Update syllabus error: ${err.message}`);
+    }
+    return true;
+  }
+
+  if (text.startsWith("/deletesyllabus")) {
+    if (!isAdmin(ctx.from?.id)) {
+      await ctx.reply("Sirf admin hi syllabus delete kar sakta hai.");
+      return true;
+    }
+    const payload = text.replace(/^\/deletesyllabus\s*/i, "").trim();
+    const parts = payload.split("|").map((p) => p.trim());
+    if (parts.length < 2) {
+      await ctx.reply(
+        "Format: /deletesyllabus <subj_1_to_6> | <unit_1_to_5> | [all | text | files]"
+      );
+      return true;
+    }
+    try {
+      const { sIdx, uIdx } = parseSubjAndUnit(parts[0], parts[1]);
+      const mode = (parts[2] || "all").toLowerCase();
+      const uData = getUnitData(sIdx, uIdx);
+
+      if (mode === "text") {
+        uData.syllabusText = "";
+      } else if (mode === "files") {
+        uData.syllabusFiles = [];
+      } else {
+        uData.syllabusText = "";
+        uData.syllabusFiles = [];
+      }
+      await ctx.reply(
+        `🟢 Syllabus (${mode}) delete ho gaya!\nSubject: ${SUBJECTS[sIdx]} • ${DEFAULT_UNITS[uIdx]}`
+      );
+    } catch (err) {
+      await ctx.reply(`Delete syllabus error: ${err.message}`);
+    }
+    return true;
+  }
+
+  // --- LECTURE ADD / UPDATE / DELETE ---
   if (text.startsWith("/addlecture")) {
     if (!isAdmin(ctx.from?.id)) {
       await ctx.reply("Sirf admin hi lecture add kar sakta hai.");
@@ -661,6 +791,80 @@ async function handleAdminTextCommand(ctx, text) {
       );
     } catch (err) {
       await ctx.reply(`Add lecture error: ${err.message}`);
+    }
+    return true;
+  }
+
+  if (text.startsWith("/updatelecture")) {
+    if (!isAdmin(ctx.from?.id)) {
+      await ctx.reply("Sirf admin hi lecture update kar sakta hai.");
+      return true;
+    }
+    const payload = text.replace(/^\/updatelecture\s*/i, "").trim();
+    const parts = payload.split("|").map((p) => p.trim());
+    if (parts.length < 4) {
+      await ctx.reply(
+        "Format: /updatelecture <subj_1_to_6> | <unit_1_to_5> | <lecture_no> | <new_title> | [optional new_youtube_url]"
+      );
+      return true;
+    }
+    try {
+      const { sIdx, uIdx } = parseSubjAndUnit(parts[0], parts[1]);
+      const lecIdx = Number(parts[2]) - 1;
+      const uData = getUnitData(sIdx, uIdx);
+      const lec = uData.lectures[lecIdx];
+      if (!lec) {
+        await ctx.reply(`Lecture #${parts[2]} nahi mila.`);
+        return true;
+      }
+      lec.title = parts[3] || lec.title;
+      if (parts[4] && isHttpUrl(parts[4])) {
+        lec.youtubeUrl = parts[4];
+      }
+      await ctx.reply(
+        `🟢 Lecture #${lecIdx + 1} update ho gaya!\nTitle: ${lec.title}\nYouTube: ${lec.youtubeUrl || "Not set"}`,
+        lectureDetailKeyboard(sIdx, uIdx, lecIdx)
+      );
+    } catch (err) {
+      await ctx.reply(`Update lecture error: ${err.message}`);
+    }
+    return true;
+  }
+
+  if (text.startsWith("/deletelecture")) {
+    if (!isAdmin(ctx.from?.id)) {
+      await ctx.reply("Sirf admin hi lecture delete kar sakta hai.");
+      return true;
+    }
+    const payload = text.replace(/^\/deletelecture\s*/i, "").trim();
+    const parts = payload.split("|").map((p) => p.trim());
+    if (parts.length < 3) {
+      await ctx.reply(
+        "Format: /deletelecture <subj_1_to_6> | <unit_1_to_5> | <lecture_no_or_all>"
+      );
+      return true;
+    }
+    try {
+      const { sIdx, uIdx } = parseSubjAndUnit(parts[0], parts[1]);
+      const uData = getUnitData(sIdx, uIdx);
+      if (parts[2].toLowerCase() === "all") {
+        uData.lectures = [];
+        await ctx.reply(
+          `🟢 ${SUBJECTS[sIdx]} (${DEFAULT_UNITS[uIdx]}) ke saare lectures delete ho gaye.`
+        );
+        return true;
+      }
+      const lecIdx = Number(parts[2]) - 1;
+      if (!uData.lectures[lecIdx]) {
+        await ctx.reply(`Lecture #${parts[2]} nahi mila.`);
+        return true;
+      }
+      const [removed] = uData.lectures.splice(lecIdx, 1);
+      await ctx.reply(
+        `🟢 Lecture "${removed.title}" delete ho gaya! Baaki lectures: ${uData.lectures.length}`
+      );
+    } catch (err) {
+      await ctx.reply(`Delete lecture error: ${err.message}`);
     }
     return true;
   }
