@@ -139,11 +139,13 @@ async function askGemini(prompt) {
   return text;
 }
 
+// Har Subject -> Unit ke alag Notes (text + files) aur Syllabus (text + files)
 const studyStore = SUBJECTS.map(() =>
   DEFAULT_UNITS.map(() => ({
     notesText: "",
     noteFiles: [],
     syllabusText: "",
+    syllabusFiles: [],
     lectures: [],
   }))
 );
@@ -155,8 +157,18 @@ function getUnitData(subjIdx, unitIdx) {
       notesText: "",
       noteFiles: [],
       syllabusText: "",
+      syllabusFiles: [],
       lectures: [],
     };
+  }
+  if (!Array.isArray(studyStore[subjIdx][unitIdx].noteFiles)) {
+    studyStore[subjIdx][unitIdx].noteFiles = [];
+  }
+  if (!Array.isArray(studyStore[subjIdx][unitIdx].syllabusFiles)) {
+    studyStore[subjIdx][unitIdx].syllabusFiles = [];
+  }
+  if (!Array.isArray(studyStore[subjIdx][unitIdx].lectures)) {
+    studyStore[subjIdx][unitIdx].lectures = [];
   }
   return studyStore[subjIdx][unitIdx];
 }
@@ -169,6 +181,7 @@ function createFreshSession() {
     pendingMockSubject: null,
     activeSubj: 0,
     activeUnit: 0,
+    uploadTargetType: "notes", // "notes" | "syllabus"
     awaitingLectureVideoFor: null,
     awaitingYoutubeFor: null,
     apkUrl: "",
@@ -188,6 +201,7 @@ function getSession(userId) {
   if (!("pendingMockSubject" in s)) s.pendingMockSubject = null;
   if (!("activeSubj" in s)) s.activeSubj = 0;
   if (!("activeUnit" in s)) s.activeUnit = 0;
+  if (!("uploadTargetType" in s)) s.uploadTargetType = "notes";
   if (!("awaitingLectureVideoFor" in s)) s.awaitingLectureVideoFor = null;
   if (!("awaitingYoutubeFor" in s)) s.awaitingYoutubeFor = null;
   return s;
@@ -268,10 +282,11 @@ function inlineMenuKeyboard() {
 
 function subjectButtonsKeyboard(prefix, isNotes = false) {
   const icon = isNotes ? "🔵" : "🟢";
+  const backIcon = isNotes ? "🔵" : "🟢";
   const rows = SUBJECTS.map((subj, idx) => [
     Markup.button.callback(`${icon} ${idx + 1}. ${subj}`, `${prefix}_${idx}`),
   ]);
-  rows.push([Markup.button.callback("🟢 Back to Menu", "back_main")]);
+  rows.push([Markup.button.callback(`${backIcon} Back to Menu`, "back_main")]);
   return Markup.inlineKeyboard(rows);
 }
 
@@ -286,7 +301,7 @@ function unitButtonsKeyboard(prefix, subjIdx, isNotes = false) {
   if (prefix === "notes_unit") {
     rows.push([
       Markup.button.callback(
-        "🔵 Merge All Notes Files -> 1 PDF",
+        "🔵 Merge Active Unit Files -> 1 PDF",
         `merge_notes_btn_${subjIdx}`
       ),
     ]);
@@ -379,8 +394,8 @@ function buildStartMessage(ctx) {
     "",
     "📚 Complete study material, instant access.",
     "",
-    "— 🔵 Notes (Unit PDF/Photo Merge)",
-    "— 🟢 Syllabus (Subject & Unit-wise)",
+    "— 🔵 Notes (Subject & Unit • Multi-PDF/Photo -> 1 PDF)",
+    "— 🟢 Syllabus (Subject & Unit-wise Admin Content)",
     "— 🟢 PYQ (Past Exam Questions Only)",
     "— 🟢 Mock Test (Short 1Hr • Full 3Hr • -1/3)",
     "— 🟢 Lecture (Subject -> Unit -> Lectures)",
@@ -391,17 +406,6 @@ function buildStartMessage(ctx) {
     "Tap any button below to begin.",
   ].join("\n");
 }
-const bot = new Telegraf(BOT_TOKEN);
-
-bot.catch(async (err, ctx) => {
-  console.error("TELEGRAF_UNHANDLED_ERROR:", err);
-  try {
-    if (ctx && typeof ctx.reply === "function") {
-      await ctx.reply(`STUDY BOT error: ${err?.message || "Unknown error"}`);
-    }
-  } catch (_) {}
-});
-
 function parseSubjAndUnit(rawSubj, rawUnit) {
   const sIdx = Number(rawSubj) - 1;
   const uIdx = Number(rawUnit) - 1;
@@ -420,29 +424,86 @@ function parseSubjAndUnit(rawSubj, rawUnit) {
   return { sIdx, uIdx };
 }
 
-async function mergeAndSendUnitNotes(ctx, sIdx, uIdx) {
+async function mergeAndSendUnitFiles(ctx, sIdx, uIdx, kind = "notes") {
+  const isNotes = kind === "notes";
   const uData = getUnitData(sIdx, uIdx);
-  if (!uData.noteFiles.length) {
-    return ctx.reply(
-      `🔵 ${SUBJECTS[sIdx]} (${DEFAULT_UNITS[uIdx]}) mein merge karne ke liye koi PDF ya Photo upload nahi hui hai.`
-    );
+  const files = isNotes ? uData.noteFiles : uData.syllabusFiles;
+  const icon = isNotes ? "🔵" : "🟢";
+  const label = isNotes ? "Notes" : "Syllabus";
+
+  if (!files.length) {
+    return null;
   }
 
   await ctx.reply(
-    `🔵 ${SUBJECTS[sIdx]} — ${DEFAULT_UNITS[uIdx]} ki ${uData.noteFiles.length} files ek PDF mein merge ho rahi hain...`
+    `${icon} ${SUBJECTS[sIdx]} — ${DEFAULT_UNITS[uIdx]} ki ${files.length} ${label} files ek PDF mein merge ho rahi hain...`
   );
 
-  const mergedBuf = await mergeFilesToSinglePdf(uData.noteFiles);
-  const fileName = `${SUBJECTS[sIdx].replace(/[^a-zA-Z0-9]+/g, "_")}_${DEFAULT_UNITS[
-    uIdx
-  ].replace(/\s+/g, "_")}_Notes.pdf`;
+  const mergedBuf = await mergeFilesToSinglePdf(files);
+  const safeSubj = SUBJECTS[sIdx].replace(/[^a-zA-Z0-9]+/g, "_");
+  const safeUnit = DEFAULT_UNITS[uIdx].replace(/\s+/g, "_");
+  const fileName = `${safeSubj}_${safeUnit}_${label}.pdf`;
 
   await ctx.replyWithDocument(
     { source: mergedBuf, filename: fileName },
     {
-      caption: `🔵 ${SUBJECTS[sIdx]} (${DEFAULT_UNITS[uIdx]}) — Combined Notes PDF (${uData.noteFiles.length} files merged)`,
-      ...inlineMenuKeyboard(),
+      caption: `${icon} ${SUBJECTS[sIdx]} (${DEFAULT_UNITS[uIdx]}) — ${label} (${files.length} files merged into 1 PDF)`,
     }
+  );
+  return true;
+}
+
+async function deliverUnitNotes(ctx, sIdx, uIdx) {
+  const uData = getUnitData(sIdx, uIdx);
+  const mergedSent = await mergeAndSendUnitFiles(ctx, sIdx, uIdx, "notes");
+
+  if (uData.notesText) {
+    await ctx.reply(
+      `🔵 Notes: ${SUBJECTS[sIdx]} (${DEFAULT_UNITS[uIdx]})\n\n${uData.notesText}`,
+      unitButtonsKeyboard("notes_unit", sIdx, true)
+    );
+    return;
+  }
+
+  if (mergedSent) {
+    await ctx.reply(
+      `🔵 ${SUBJECTS[sIdx]} (${DEFAULT_UNITS[uIdx]}) — Aur unit chunein:`,
+      unitButtonsKeyboard("notes_unit", sIdx, true)
+    );
+    return;
+  }
+
+  await replacePage(
+    ctx,
+    `🔵 Notes: ${SUBJECTS[sIdx]} (${DEFAULT_UNITS[uIdx]})\n\nIs subject aur unit ke notes abhi admin ne add nahi kiye hain.`,
+    unitButtonsKeyboard("notes_unit", sIdx, true)
+  );
+}
+
+async function deliverUnitSyllabus(ctx, sIdx, uIdx) {
+  const uData = getUnitData(sIdx, uIdx);
+  const mergedSent = await mergeAndSendUnitFiles(ctx, sIdx, uIdx, "syllabus");
+
+  if (uData.syllabusText) {
+    await ctx.reply(
+      `🟢 Syllabus: ${SUBJECTS[sIdx]} (${DEFAULT_UNITS[uIdx]})\n\n${uData.syllabusText}`,
+      unitButtonsKeyboard("syl_unit", sIdx, false)
+    );
+    return;
+  }
+
+  if (mergedSent) {
+    await ctx.reply(
+      `🟢 ${SUBJECTS[sIdx]} (${DEFAULT_UNITS[uIdx]}) — Aur unit chunein:`,
+      unitButtonsKeyboard("syl_unit", sIdx, false)
+    );
+    return;
+  }
+
+  await replacePage(
+    ctx,
+    `🟢 Syllabus: ${SUBJECTS[sIdx]} (${DEFAULT_UNITS[uIdx]})\n\nIs subject aur unit ka syllabus abhi admin ne add nahi kiya hai.`,
+    unitButtonsKeyboard("syl_unit", sIdx, false)
   );
 }
 
@@ -474,7 +535,9 @@ async function handleAdminTextCommand(ctx, text) {
         "STUDY BOT Session Status:",
         `• Active Subject: ${SUBJECTS[s.activeSubj ?? 0]}`,
         `• Active Unit: ${DEFAULT_UNITS[s.activeUnit ?? 0]}`,
-        `• Staged Unit Note Files (PDF/Photo): ${uData.noteFiles.length}`,
+        `• Upload Target Mode: ${s.uploadTargetType === "syllabus" ? "Syllabus" : "Notes"}`,
+        `• Unit Note Files (PDF/Photo): ${uData.noteFiles.length}`,
+        `• Unit Syllabus Files (PDF/Photo): ${uData.syllabusFiles.length}`,
         `• Unit Lectures Count: ${uData.lectures.length}`,
         `• APK URL: ${s.apkUrl || "Pending"}`,
         `• Source ZIP URL: ${s.sourceZipUrl || "Not provided"}`,
@@ -491,26 +554,31 @@ async function handleAdminTextCommand(ctx, text) {
       await ctx.reply("Sirf admin hi notes add kar sakta hai.");
       return true;
     }
-    const payload = text.replace(/^\/addnotes\s*/i, "");
+    const payload = text.replace(/^\/addnotes\s*/i, "").trim();
     const parts = payload.split("|").map((p) => p.trim());
-    if (parts.length < 3) {
+    if (parts.length < 2) {
       await ctx.reply(
-        "Format: /addnotes <subj_1_to_6> | <unit_1_to_5> | <notes text>"
+        "Format: /addnotes <subj_1_to_6> | <unit_1_to_5> | <optional notes text>\n(Notes text na bhi likhein to target Subject+Unit set ho jayega aur aap jitni chahein PDF/Photo bhej sakte hain)"
       );
       return true;
     }
     try {
       const { sIdx, uIdx } = parseSubjAndUnit(parts[0], parts[1]);
-      const noteBody = parts.slice(2).join(" | ");
+      const noteBody = parts.slice(2).join(" | ").trim();
       const uData = getUnitData(sIdx, uIdx);
-      uData.notesText = uData.notesText
-        ? `${uData.notesText}\n\n${noteBody}`
-        : noteBody;
+      if (noteBody) {
+        uData.notesText = uData.notesText
+          ? `${uData.notesText}\n\n${noteBody}`
+          : noteBody;
+      }
+
       const s = getSession(ctx.from?.id);
       s.activeSubj = sIdx;
       s.activeUnit = uIdx;
+      s.uploadTargetType = "notes";
+
       await ctx.reply(
-        `🔵 Notes add ho gaye!\nSubject: ${SUBJECTS[sIdx]}\nUnit: ${DEFAULT_UNITS[uIdx]}\n\nAb is unit ke liye PDFs/Photos bhej kar /mergenotes ${sIdx + 1} | ${uIdx + 1} chala sakte hain.`
+        `🔵 Active target set: ${SUBJECTS[sIdx]} — ${DEFAULT_UNITS[uIdx]} (Notes).\nAb is unit ke liye jitni chahein PDFs ya Photos bhejein; user ko sab ek merged PDF mein milengi.`
       );
     } catch (err) {
       await ctx.reply(`Add notes error: ${err.message}`);
@@ -523,21 +591,29 @@ async function handleAdminTextCommand(ctx, text) {
       await ctx.reply("Sirf admin hi syllabus add kar sakta hai.");
       return true;
     }
-    const payload = text.replace(/^\/addsyllabus\s*/i, "");
+    const payload = text.replace(/^\/addsyllabus\s*/i, "").trim();
     const parts = payload.split("|").map((p) => p.trim());
-    if (parts.length < 3) {
+    if (parts.length < 2) {
       await ctx.reply(
-        "Format: /addsyllabus <subj_1_to_6> | <unit_1_to_5> | <syllabus text>"
+        "Format: /addsyllabus <subj_1_to_6> | <unit_1_to_5> | <optional syllabus text>"
       );
       return true;
     }
     try {
       const { sIdx, uIdx } = parseSubjAndUnit(parts[0], parts[1]);
-      const sylBody = parts.slice(2).join(" | ");
+      const sylBody = parts.slice(2).join(" | ").trim();
       const uData = getUnitData(sIdx, uIdx);
-      uData.syllabusText = sylBody;
+      if (sylBody) {
+        uData.syllabusText = sylBody;
+      }
+
+      const s = getSession(ctx.from?.id);
+      s.activeSubj = sIdx;
+      s.activeUnit = uIdx;
+      s.uploadTargetType = "syllabus";
+
       await ctx.reply(
-        `🟢 Syllabus update ho gaya!\nSubject: ${SUBJECTS[sIdx]}\nUnit: ${DEFAULT_UNITS[uIdx]}`
+        `🟢 Active target set: ${SUBJECTS[sIdx]} — ${DEFAULT_UNITS[uIdx]} (Syllabus).\nAb is unit ke liye syllabus text ya PDFs/Photos bhej sakte hain.`
       );
     } catch (err) {
       await ctx.reply(`Add syllabus error: ${err.message}`);
@@ -607,9 +683,44 @@ async function handleAdminTextCommand(ctx, text) {
       }
     }
     try {
-      await mergeAndSendUnitNotes(ctx, sIdx, uIdx);
+      const sent = await mergeAndSendUnitFiles(ctx, sIdx, uIdx, "notes");
+      if (!sent) {
+        await ctx.reply(
+          `🔵 ${SUBJECTS[sIdx]} (${DEFAULT_UNITS[uIdx]}) mein merge karne ke liye koi file upload nahi hui hai.`
+        );
+      }
     } catch (err) {
       await ctx.reply(`Merge notes error: ${err.message}`);
+    }
+    return true;
+  }
+
+  if (text.startsWith("/mergesyllabus")) {
+    if (!isAdmin(ctx.from?.id)) {
+      await ctx.reply("Sirf admin hi syllabus merge kar sakta hai.");
+      return true;
+    }
+    const s = getSession(ctx.from?.id);
+    const payload = text.replace(/^\/mergesyllabus\s*/i, "").trim();
+    let sIdx = s.activeSubj ?? 0;
+    let uIdx = s.activeUnit ?? 0;
+    if (payload) {
+      const parts = payload.split("|").map((p) => p.trim());
+      if (parts.length >= 2) {
+        const parsed = parseSubjAndUnit(parts[0], parts[1]);
+        sIdx = parsed.sIdx;
+        uIdx = parsed.uIdx;
+      }
+    }
+    try {
+      const sent = await mergeAndSendUnitFiles(ctx, sIdx, uIdx, "syllabus");
+      if (!sent) {
+        await ctx.reply(
+          `🟢 ${SUBJECTS[sIdx]} (${DEFAULT_UNITS[uIdx]}) mein merge karne ke liye koi syllabus file upload nahi hui hai.`
+        );
+      }
+    } catch (err) {
+      await ctx.reply(`Merge syllabus error: ${err.message}`);
     }
     return true;
   }
@@ -828,6 +939,7 @@ async function handleCallbackData(ctx, data) {
   }
 
   if (data === "menu_notes") {
+    s.uploadTargetType = "notes";
     await replacePage(
       ctx,
       "🔵 Notes — Subject Chunein:",
@@ -837,6 +949,7 @@ async function handleCallbackData(ctx, data) {
   }
 
   if (data === "menu_syllabus") {
+    s.uploadTargetType = "syllabus";
     await replacePage(
       ctx,
       "🟢 Syllabus — Subject Chunein:",
@@ -877,9 +990,10 @@ async function handleCallbackData(ctx, data) {
     const subjectName = SUBJECTS[i];
     if (!subjectName) return true;
     s.activeSubj = i;
+    s.uploadTargetType = "notes";
     await replacePage(
       ctx,
-      `🔵 Notes: ${subjectName}\nUnit chunein (ya is subject ki unit files merge karein):`,
+      `🔵 Notes: ${subjectName}\nUnit chunein:`,
       unitButtonsKeyboard("notes_unit", i, true)
     );
     return true;
@@ -888,7 +1002,17 @@ async function handleCallbackData(ctx, data) {
   if (data.startsWith("merge_notes_btn_")) {
     const i = Number(data.replace("merge_notes_btn_", ""));
     try {
-      await mergeAndSendUnitNotes(ctx, i, s.activeUnit ?? 0);
+      const sent = await mergeAndSendUnitFiles(
+        ctx,
+        i,
+        s.activeUnit ?? 0,
+        "notes"
+      );
+      if (!sent) {
+        await ctx.reply(
+          `🔵 ${SUBJECTS[i]} (${DEFAULT_UNITS[s.activeUnit ?? 0]}) mein merge karne ke liye koi file upload nahi hui hai.`
+        );
+      }
     } catch (err) {
       await ctx.reply(`Merge error: ${err.message}`);
     }
@@ -899,6 +1023,8 @@ async function handleCallbackData(ctx, data) {
     const i = Number(data.replace("syl_subj_", ""));
     const subjectName = SUBJECTS[i];
     if (!subjectName) return true;
+    s.activeSubj = i;
+    s.uploadTargetType = "syllabus";
     await replacePage(
       ctx,
       `🟢 Syllabus: ${subjectName}\nUnit chunein:`,
@@ -911,6 +1037,7 @@ async function handleCallbackData(ctx, data) {
     const i = Number(data.replace("lec_subj_", ""));
     const subjectName = SUBJECTS[i];
     if (!subjectName) return true;
+    s.activeSubj = i;
     await replacePage(
       ctx,
       `🟢 Lecture: ${subjectName}\nUnit chunein:`,
@@ -953,49 +1080,18 @@ async function handleCallbackData(ctx, data) {
     const [, , iStr, uStr] = data.split("_");
     const i = Number(iStr);
     const u = Number(uStr);
-    const subjectName = SUBJECTS[i];
-    const unitLabel = DEFAULT_UNITS[u];
-    if (!subjectName || !unitLabel) return true;
+    if (!SUBJECTS[i] || !DEFAULT_UNITS[u]) return true;
 
     s.activeSubj = i;
     s.activeUnit = u;
-    const uData = getUnitData(i, u);
-
-    if (uData.noteFiles.length > 0) {
-      try {
-        await mergeAndSendUnitNotes(ctx, i, u);
-        return true;
-      } catch (err) {
-        await ctx.reply(`PDF merge error: ${err.message}`);
-      }
-    }
-
-    if (uData.notesText) {
-      await replacePage(
-        ctx,
-        `🔵 Notes: ${subjectName} (${unitLabel})\n\n${uData.notesText}`,
-        unitButtonsKeyboard("notes_unit", i, true)
-      );
-      return true;
-    }
+    s.uploadTargetType = "notes";
 
     try {
-      await replacePage(
-        ctx,
-        `🔵 ${subjectName} (${unitLabel}) ke notes taiyar kiye ja rahe hain...`
-      );
-      const aiText = await askGemini(
-        `Create concise, well-structured revision notes for "${unitLabel}" of "${subjectName}".`
-      );
-      await replacePage(
-        ctx,
-        `🔵 Notes: ${subjectName} (${unitLabel})\n\n${aiText}`,
-        unitButtonsKeyboard("notes_unit", i, true)
-      );
+      await deliverUnitNotes(ctx, i, u);
     } catch (err) {
       await replacePage(
         ctx,
-        `Notes error: ${err.message}`,
+        `🔵 Notes error: ${err.message}`,
         unitButtonsKeyboard("notes_unit", i, true)
       );
     }
@@ -1006,37 +1102,18 @@ async function handleCallbackData(ctx, data) {
     const [, , iStr, uStr] = data.split("_");
     const i = Number(iStr);
     const u = Number(uStr);
-    const subjectName = SUBJECTS[i];
-    const unitLabel = DEFAULT_UNITS[u];
-    if (!subjectName || !unitLabel) return true;
+    if (!SUBJECTS[i] || !DEFAULT_UNITS[u]) return true;
 
-    const uData = getUnitData(i, u);
-    if (uData.syllabusText) {
-      await replacePage(
-        ctx,
-        `🟢 Syllabus: ${subjectName} (${unitLabel})\n\n${uData.syllabusText}`,
-        unitButtonsKeyboard("syl_unit", i, false)
-      );
-      return true;
-    }
+    s.activeSubj = i;
+    s.activeUnit = u;
+    s.uploadTargetType = "syllabus";
 
     try {
-      await replacePage(
-        ctx,
-        `🟢 ${subjectName} (${unitLabel}) ka syllabus load ho raha hai...`
-      );
-      const aiText = await askGemini(
-        `Provide the detailed syllabus topics for "${unitLabel}" of "${subjectName}".`
-      );
-      await replacePage(
-        ctx,
-        `🟢 Syllabus: ${subjectName} (${unitLabel})\n\n${aiText}`,
-        unitButtonsKeyboard("syl_unit", i, false)
-      );
+      await deliverUnitSyllabus(ctx, i, u);
     } catch (err) {
       await replacePage(
         ctx,
-        `Syllabus error: ${err.message}`,
+        `🟢 Syllabus error: ${err.message}`,
         unitButtonsKeyboard("syl_unit", i, false)
       );
     }
@@ -1051,6 +1128,8 @@ async function handleCallbackData(ctx, data) {
     const unitLabel = DEFAULT_UNITS[u];
     if (!subjectName || !unitLabel) return true;
 
+    s.activeSubj = i;
+    s.activeUnit = u;
     const uData = getUnitData(i, u);
     const count = uData.lectures.length;
     const text =
@@ -1147,7 +1226,7 @@ async function handleCallbackData(ctx, data) {
   }
 
   if (data.startsWith("mock_mode_")) {
-    const parts = data.split("_"); // mock, mode, i, modeKey
+    const parts = data.split("_");
     const i = Number(parts[2]);
     const modeKey = parts[3];
     const subjectName = SUBJECTS[i];
@@ -1185,7 +1264,7 @@ async function handleCallbackData(ctx, data) {
   }
 
   if (data.startsWith("mock_ans_")) {
-    const parts = data.split("_"); // mock, ans, qIdx, opt
+    const parts = data.split("_");
     const qIdx = Number(parts[2]);
     const opt = parts[3];
     if (!s.mock || s.mock.index !== qIdx) return true;
@@ -1307,6 +1386,15 @@ async function handleBuildCommand(ctx, text) {
   return false;
 }
 
+bot.catch(async (err, ctx) => {
+  console.error("TELEGRAF_UNHANDLED_ERROR:", err);
+  try {
+    if (ctx && typeof ctx.reply === "function") {
+      await ctx.reply(`STUDY BOT error: ${err?.message || "Unknown error"}`);
+    }
+  } catch (_) {}
+});
+
 bot.use(async (ctx, next) => {
   if (ctx.callbackQuery?.data) {
     const handled = await handleCallbackData(ctx, ctx.callbackQuery.data);
@@ -1317,19 +1405,27 @@ bot.use(async (ctx, next) => {
   if (!msg) return next();
 
   const s = getSession(ctx.from?.id);
+  const sIdx = s.activeSubj ?? 0;
+  const uIdx = s.activeUnit ?? 0;
 
   if (Array.isArray(msg.photo) && msg.photo.length > 0 && isAdmin(ctx.from?.id)) {
     try {
       const largest = msg.photo[msg.photo.length - 1];
       const fileLink = await ctx.telegram.getFileLink(largest.file_id);
-      const uData = getUnitData(s.activeSubj ?? 0, s.activeUnit ?? 0);
-      uData.noteFiles.push({
+      const uData = getUnitData(sIdx, uIdx);
+      const isSyl = s.uploadTargetType === "syllabus";
+      const list = isSyl ? uData.syllabusFiles : uData.noteFiles;
+      const icon = isSyl ? "🟢" : "🔵";
+      const label = isSyl ? "Syllabus" : "Notes";
+
+      list.push({
         name: `photo_${Date.now()}.jpg`,
         url: fileLink.href,
         mime: "image/jpeg",
       });
+
       await ctx.reply(
-        `🔵 Photo notes mein add ho gayi! (${DEFAULT_UNITS[s.activeUnit ?? 0]} • Total files: ${uData.noteFiles.length})\nAur PDF/Photo bhejein ya /mergenotes se ek PDF banayein.`
+        `${icon} Photo ${label} mein add ho gayi!\nSubject: ${SUBJECTS[sIdx]} • ${DEFAULT_UNITS[uIdx]}\nTotal ${label} files in unit: ${list.length}`
       );
     } catch (err) {
       await ctx.reply(`Photo error: ${err.message}`);
@@ -1382,14 +1478,20 @@ bot.use(async (ctx, next) => {
     if (fileName.endsWith(".pdf") && isAdmin(ctx.from?.id)) {
       try {
         const fileLink = await ctx.telegram.getFileLink(doc.file_id);
-        const uData = getUnitData(s.activeSubj ?? 0, s.activeUnit ?? 0);
-        uData.noteFiles.push({
-          name: doc.file_name || `notes_${Date.now()}.pdf`,
+        const uData = getUnitData(sIdx, uIdx);
+        const isSyl = s.uploadTargetType === "syllabus";
+        const list = isSyl ? uData.syllabusFiles : uData.noteFiles;
+        const icon = isSyl ? "🟢" : "🔵";
+        const label = isSyl ? "Syllabus" : "Notes";
+
+        list.push({
+          name: doc.file_name || `file_${Date.now()}.pdf`,
           url: fileLink.href,
           mime: "application/pdf",
         });
+
         await ctx.reply(
-          `🔵 PDF "${doc.file_name}" notes mein add ho gayi! (${DEFAULT_UNITS[s.activeUnit ?? 0]} • Total files: ${uData.noteFiles.length})\nAur PDF/Photo bhejein ya /mergenotes se ek single PDF banayein.`
+          `${icon} PDF "${doc.file_name}" ${label} mein add ho gayi!\nSubject: ${SUBJECTS[sIdx]} • ${DEFAULT_UNITS[uIdx]}\nTotal ${label} files in unit: ${list.length}`
         );
       } catch (err) {
         await ctx.reply(`PDF upload error: ${err.message}`);
