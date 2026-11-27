@@ -1,6 +1,7 @@
 {
   "name": "any-cousre-bot",
   "version": "1.0.0",
+  "description": "Telegram STUDY BOT with Notes, Syllabus, Past PYQ, Mock Test, Lecture management, PDF/Image merge, and APK build triggers",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -9,7 +10,7 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
-    "telegraf": "^4.16.3",
-    "pdf-lib": "^1.17.1"
+    "pdf-lib": "^1.17.1",
+    "telegraf": "^4.16.3"
   }
 }
