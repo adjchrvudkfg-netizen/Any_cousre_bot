@@ -41,7 +41,6 @@ http
   .listen(PORT, () => {
     console.log(`HTTP server listening on port ${PORT}`);
   });
-
 async function askGemini(prompt) {
   if (!GEMINI_API_KEY) {
     throw new Error("GEMINI_API_KEY environment variable missing hai.");
@@ -57,7 +56,7 @@ async function askGemini(prompt) {
     body: JSON.stringify({
       contents: [{ parts: [{ text: prompt }] }],
       generationConfig: {
-        temperature: 0.4,
+        temperature: 0.45,
       },
     }),
   });
@@ -79,17 +78,27 @@ async function askGemini(prompt) {
   }
   return text;
 }
+
 const sessions = new Map();
 
 function getSession(userId) {
   if (!sessions.has(userId)) {
-    sessions.set(userId, { mock: null });
+    sessions.set(userId, { mock: null, pendingMockSubject: null });
   }
   const s = sessions.get(userId);
-  if (!s.mock) s.mock = null;
+  if (!("mock" in s)) s.mock = null;
+  if (!("pendingMockSubject" in s)) s.pendingMockSubject = null;
   return s;
 }
 
+async function replacePage(ctx, text, extra = {}) {
+  try {
+    if (ctx.callbackQuery?.message?.message_id) {
+      await ctx.deleteMessage(ctx.callbackQuery.message.message_id).catch(() => {});
+    }
+  } catch (_) {}
+  return ctx.reply(text, extra);
+}
 function isHttpUrl(str) {
   try {
     const u = new URL(str);
@@ -140,8 +149,6 @@ async function dispatchWorkflow(workflowFile, inputs) {
     throw new Error(`GitHub Actions dispatch fail (${res.status}): ${errText}`);
   }
 }
-
-// Notes ke buttons blue indicator (🟦) ke saath, baaki sab green indicator (🟩) ke saath
 function inlineMenuKeyboard() {
   return Markup.inlineKeyboard([
     [Markup.button.callback("🟦 Notes", "menu_notes")],
@@ -165,6 +172,25 @@ function subjectButtonsKeyboard(prefix, isNotes = false) {
   return Markup.inlineKeyboard(rows);
 }
 
+function mockModeKeyboard(subjIdx) {
+  return Markup.inlineKeyboard([
+    [
+      Markup.button.callback(
+        "🟩 Short Test (Unit • 40 Q • 40M • -1/3 • 1 Hr)",
+        `mock_mode_${subjIdx}_short`
+      ),
+    ],
+    [
+      Markup.button.callback(
+        "🟩 Full Course (Full Syllabus • 80 Q • 80M • -1/3 • 3 Hr)",
+        `mock_mode_${subjIdx}_full`
+      ),
+    ],
+    [Markup.button.callback("🟩 Back to Subjects", "menu_mock")],
+    [Markup.button.callback("🟩 Back to Menu", "back_main")],
+  ]);
+}
+
 function mockOptionKeyboard(qIndex) {
   return Markup.inlineKeyboard([
     [
@@ -173,7 +199,10 @@ function mockOptionKeyboard(qIndex) {
       Markup.button.callback("🟩 C", `mock_ans_${qIndex}_C`),
       Markup.button.callback("🟩 D", `mock_ans_${qIndex}_D`),
     ],
-    [Markup.button.callback("🟩 E (Chhodna / Skip)", `mock_ans_${qIndex}_E`)],
+    [
+      Markup.button.callback("🟩 E (Chhodna / Skip)", `mock_ans_${qIndex}_E`),
+      Markup.button.callback("🟩 Submit Test", `mock_submit_${qIndex}`),
+    ],
   ]);
 }
 
@@ -190,8 +219,8 @@ function buildStartMessage(ctx) {
     "",
     "— 🟦 Notes (6 Subjects)",
     "— 🟩 Syllabus (6 Subjects)",
-    "— 🟩 PYQ (Gemini AI)",
-    "— 🟩 Mock Test (20 Questions AI)",
+    "— 🟩 PYQ (Subject-wise AI)",
+    "— 🟩 Mock Test (Short 1Hr • Full 3Hr • -1/3)",
     "— 🟩 Lecture (6 Subjects)",
     "━━━━━━━━━━━━━━━━━━━━",
     `👤 User ID: ${userId}`,
@@ -212,8 +241,8 @@ bot.catch(async (err, ctx) => {
 });
 
 bot.start(async (ctx) => {
-  sessions.set(ctx.from.id, { mock: null });
-  await ctx.reply(buildStartMessage(ctx), {
+  sessions.set(ctx.from.id, { mock: null, pendingMockSubject: null });
+  await replacePage(ctx, buildStartMessage(ctx), {
     ...inlineMenuKeyboard(),
     reply_markup: {
       ...inlineMenuKeyboard().reply_markup,
@@ -224,33 +253,42 @@ bot.start(async (ctx) => {
 
 bot.action("back_main", async (ctx) => {
   await ctx.answerCbQuery();
-  await ctx.reply(buildStartMessage(ctx), inlineMenuKeyboard());
+  await replacePage(ctx, buildStartMessage(ctx), inlineMenuKeyboard());
 });
 
-// Notes -> 6 Subject Buttons (Blue indicator)
 bot.action("menu_notes", async (ctx) => {
   await ctx.answerCbQuery();
-  await ctx.reply(
+  await replacePage(
+    ctx,
     "🟦 *Notes — Subject Chunein:*",
     subjectButtonsKeyboard("notes_subj", true)
   );
 });
 
-// Syllabus -> Same 6 Subject Buttons (Green indicator)
 bot.action("menu_syllabus", async (ctx) => {
   await ctx.answerCbQuery();
-  await ctx.reply(
+  await replacePage(
+    ctx,
     "🟩 *Syllabus — Subject Chunein:*",
     subjectButtonsKeyboard("syl_subj", false)
   );
 });
 
-// Lecture -> Same 6 Subject Buttons (Green indicator)
 bot.action("menu_lecture", async (ctx) => {
   await ctx.answerCbQuery();
-  await ctx.reply(
+  await replacePage(
+    ctx,
     "🟩 *Lecture — Subject Chunein:*",
     subjectButtonsKeyboard("lec_subj", false)
+  );
+});
+
+bot.action("menu_pyq", async (ctx) => {
+  await ctx.answerCbQuery();
+  await replacePage(
+    ctx,
+    "🟩 *PYQ (Previous Year Questions) — Subject Chunein:*",
+    subjectButtonsKeyboard("pyq_subj", false)
   );
 });
 
@@ -260,7 +298,10 @@ for (let i = 0; i < SUBJECTS.length; i++) {
   bot.action(`notes_subj_${i}`, async (ctx) => {
     await ctx.answerCbQuery();
     try {
-      await ctx.reply(`🟦 *${subjectName}* ke notes taiyar kiye ja rahe hain...`);
+      await replacePage(
+        ctx,
+        `🟦 *${subjectName}* ke notes taiyar kiye ja rahe hain...`
+      );
       const aiText = await askGemini(
         `Create clear, structured study notes and key revision points for the subject "${subjectName}". Keep it concise and easy to read on mobile.`
       );
@@ -269,14 +310,17 @@ for (let i = 0; i < SUBJECTS.length; i++) {
         subjectButtonsKeyboard("notes_subj", true)
       );
     } catch (err) {
-      await ctx.reply(`Notes error: ${err.message}`);
+      await ctx.reply(
+        `Notes error: ${err.message}`,
+        subjectButtonsKeyboard("notes_subj", true)
+      );
     }
   });
 
   bot.action(`syl_subj_${i}`, async (ctx) => {
     await ctx.answerCbQuery();
     try {
-      await ctx.reply(`🟩 *${subjectName}* ka syllabus load ho raha hai...`);
+      await replacePage(ctx, `🟩 *${subjectName}* ka syllabus load ho raha hai...`);
       const aiText = await askGemini(
         `Provide a clean unit-wise and topic-wise syllabus outline for "${subjectName}".`
       );
@@ -285,14 +329,20 @@ for (let i = 0; i < SUBJECTS.length; i++) {
         subjectButtonsKeyboard("syl_subj", false)
       );
     } catch (err) {
-      await ctx.reply(`Syllabus error: ${err.message}`);
+      await ctx.reply(
+        `Syllabus error: ${err.message}`,
+        subjectButtonsKeyboard("syl_subj", false)
+      );
     }
   });
 
   bot.action(`lec_subj_${i}`, async (ctx) => {
     await ctx.answerCbQuery();
     try {
-      await ctx.reply(`🟩 *${subjectName}* ke lecture topics & guide taiyar ho rahe hain...`);
+      await replacePage(
+        ctx,
+        `🟩 *${subjectName}* ke lecture topics & guide taiyar ho rahe hain...`
+      );
       const aiText = await askGemini(
         `List key lecture topics, study sequence, and what to focus on in video/class lectures for "${subjectName}".`
       );
@@ -301,45 +351,160 @@ for (let i = 0; i < SUBJECTS.length; i++) {
         subjectButtonsKeyboard("lec_subj", false)
       );
     } catch (err) {
-      await ctx.reply(`Lecture error: ${err.message}`);
+      await ctx.reply(
+        `Lecture error: ${err.message}`,
+        subjectButtonsKeyboard("lec_subj", false)
+      );
+    }
+  });
+
+  bot.action(`pyq_subj_${i}`, async (ctx) => {
+    await ctx.answerCbQuery();
+    try {
+      await replacePage(
+        ctx,
+        `🟩 *${subjectName}* ke Previous Year Questions (PYQ) taiyar ho rahe hain...`
+      );
+      const aiText = await askGemini(
+        `Provide 6 important Previous Year Questions (PYQs) specifically for the subject "${subjectName}", each with year/exam tag, correct answer, and brief explanation.`
+      );
+      await ctx.reply(
+        `🟩 *PYQ: ${subjectName}*\n\n${aiText}`,
+        subjectButtonsKeyboard("pyq_subj", false)
+      );
+    } catch (err) {
+      await ctx.reply(
+        `PYQ error: ${err.message}`,
+        subjectButtonsKeyboard("pyq_subj", false)
+      );
     }
   });
 }
-async function generateMockSet(subjectLabel = "All Subjects") {
-  const prompt = [
-    `Generate exactly 20 multiple-choice questions for "${subjectLabel}".`,
-    `Return ONLY valid JSON (no markdown fences) as an array of 20 objects with this exact structure:`,
-    `[{"q":"Question text","A":"Option A","B":"Option B","C":"Option C","D":"Option D","ans":"A","reason":"Short explanation"}]`,
-    `Rules: "ans" must be one of "A", "B", "C", or "D". Every question must have distinct, realistic options.`,
-  ].join("\n");
+const MOCK_CONFIGS = {
+  short: {
+    mode: "short",
+    label: "Short Test (Unit-wise)",
+    count: 40,
+    totalMarks: 40,
+    marksPerQ: 1,
+    negativePerWrong: 1 / 3,
+    durationMins: 60, // 1 hour
+    timeLabel: "1 Hour (60 Min)",
+    scopePrompt: "a core unit/chapter of",
+  },
+  full: {
+    mode: "full",
+    label: "Full Course Test",
+    count: 80,
+    totalMarks: 80,
+    marksPerQ: 1,
+    negativePerWrong: 1 / 3,
+    durationMins: 180, // 3 hours
+    timeLabel: "3 Hours (180 Min)",
+    scopePrompt: "the full syllabus of",
+  },
+};
 
-  const raw = await askGemini(prompt);
+function parseJsonArraySafe(raw) {
   const cleaned = raw
     .replace(/^```json\s*/i, "")
     .replace(/^```\s*/i, "")
     .replace(/\s*```$/i, "")
     .trim();
 
-  const parsed = JSON.parse(cleaned);
-  if (!Array.isArray(parsed) || parsed.length === 0) {
-    throw new Error("Mock test questions parse nahi ho paye.");
+  try {
+    const parsed = JSON.parse(cleaned);
+    if (Array.isArray(parsed)) return parsed;
+  } catch (_) {}
+
+  const start = cleaned.indexOf("[");
+  const end = cleaned.lastIndexOf("]");
+  if (start !== -1 && end !== -1 && end > start) {
+    const sliced = cleaned.slice(start, end + 1);
+    const parsed = JSON.parse(sliced);
+    if (Array.isArray(parsed)) return parsed;
   }
-  return parsed.slice(0, 20);
+  throw new Error("Question paper JSON parse nahi ho paya.");
 }
 
+async function generateExamPaperBatch(subjectName, modeKey, startNum, batchSize) {
+  const cfg = MOCK_CONFIGS[modeKey] || MOCK_CONFIGS.short;
+  const prompt = [
+    `Create ${batchSize} high-quality exam practice multiple-choice questions (numbered starting at ${startNum}) covering ${cfg.scopePrompt} "${subjectName}".`,
+    `Focus on strong conceptual clarity, definitions, reactions/mechanisms/principles/code/communication concepts suitable for serious exam practice.`,
+    `Return ONLY valid JSON (no markdown fences) as an array of ${batchSize} objects with this exact structure:`,
+    `[{"unit":"Unit 1","q":"Question text","A":"Option A","B":"Option B","C":"Option C","D":"Option D","ans":"A","reason":"Concise explanation"}]`,
+    `Rules: "ans" must be one of "A", "B", "C", or "D". All 4 options must be distinct and plausible.`,
+  ].join("\n");
+
+  const raw = await askGemini(prompt);
+  const items = parseJsonArraySafe(raw);
+  return items.slice(0, batchSize).map((item, idx) => ({
+    unit: item.unit || (modeKey === "short" ? "Unit Paper" : "Full Syllabus"),
+    q: item.q || `Practice Question ${startNum + idx}`,
+    A: item.A || "Option A",
+    B: item.B || "Option B",
+    C: item.C || "Option C",
+    D: item.D || "Option D",
+    ans: ["A", "B", "C", "D"].includes(String(item.ans || "").toUpperCase())
+      ? String(item.ans).toUpperCase()
+      : "A",
+    reason: item.reason || "Concept review recommended.",
+  }));
+}
+
+async function generateFullExamPaper(subjectName, modeKey, ctx) {
+  const cfg = MOCK_CONFIGS[modeKey] || MOCK_CONFIGS.short;
+  const batchSize = 20;
+  const allQuestions = [];
+
+  for (let offset = 0; offset < cfg.count; offset += batchSize) {
+    const currentBatch = Math.min(batchSize, cfg.count - offset);
+    if (ctx && cfg.count > 20) {
+      await replacePage(
+        ctx,
+        `🟩 *${subjectName}* — *${cfg.label}*\nPractice questions ban rahe hain: *${Math.min(
+          offset + currentBatch,
+          cfg.count
+        )} / ${cfg.count}*...`
+      );
+    }
+    const batch = await generateExamPaperBatch(
+      subjectName,
+      modeKey,
+      offset + 1,
+      currentBatch
+    );
+    allQuestions.push(...batch);
+  }
+
+  return allQuestions.slice(0, cfg.count);
+}
 async function sendMockQuestion(ctx, s) {
   const m = s.mock;
   if (!m || m.index >= m.questions.length) {
     return finishMockTest(ctx, s);
   }
 
+  const elapsedMins = Math.max(
+    0,
+    Math.floor((Date.now() - m.startedAt) / 60000)
+  );
+  if (elapsedMins >= m.durationMins) {
+    await ctx.reply("⏱️ *Time over!* Aapka paper auto-submit ho raha hai.");
+    return finishMockTest(ctx, s);
+  }
+
   const qObj = m.questions[m.index];
   const qNum = m.index + 1;
+  const remainingMins = Math.max(0, m.durationMins - elapsedMins);
 
   const text = [
-    `🟩 *Mock Test (${qNum} / ${m.questions.length})*`,
-    "",
-    `*Q${qNum}.* ${qObj.q}`,
+    `🟩 *${m.subject}*`,
+    `📝 *${m.label}* | MM: ${m.totalMarks} | Neg: -1/3 | Left: ~${remainingMins}m`,
+    `━━━━━━━━━━━━━━━━━━━━`,
+    `*Q${qNum} / ${m.questions.length}* [${qObj.unit} • +${m.marksPerQ} / -1/3]:`,
+    `${qObj.q}`,
     "",
     `A) ${qObj.A}`,
     `B) ${qObj.B}`,
@@ -348,7 +513,7 @@ async function sendMockQuestion(ctx, s) {
     `E) Chhodna (Skip)`,
   ].join("\n");
 
-  await ctx.reply(text, mockOptionKeyboard(m.index));
+  await replacePage(ctx, text, mockOptionKeyboard(m.index));
 }
 
 async function finishMockTest(ctx, s) {
@@ -361,84 +526,132 @@ async function finishMockTest(ctx, s) {
   let skippedCount = 0;
   const reviewLines = [];
 
-  m.questions.forEach((qObj, idx) => {
-    const picked = m.answers[idx] || "E";
-    if (picked === "E") {
+  for (let idx = 0; idx < m.questions.length; idx++) {
+    const qObj = m.questions[idx];
+    const picked = m.answers[idx];
+
+    if (!picked || picked === "E") {
       skippedCount++;
       reviewLines.push(
-        `Q${idx + 1}: ⏭️ Chhoda (Sahi: ${qObj.ans}) — ${qObj.reason}`
+        `Q${idx + 1}: ⏭️ Chhoda (0 | Sahi: ${qObj.ans}) — ${qObj.reason}`
       );
     } else if (picked === qObj.ans) {
       correctCount++;
-      reviewLines.push(`Q${idx + 1}: ✅ Sahi (${picked})`);
+      reviewLines.push(`Q${idx + 1}: ✅ Sahi (${picked} • +1)`);
     } else {
       wrongCount++;
       reviewLines.push(
-        `Q${idx + 1}: ❌ Galat (${picked} | Sahi: ${qObj.ans}) — ${qObj.reason}`
+        `Q${idx + 1}: ❌ Galat (${picked} | Sahi: ${qObj.ans} • -1/3) — ${qObj.reason}`
       );
     }
-  });
+  }
+
+  const positiveMarks = correctCount * m.marksPerQ;
+  const negativeMarks = wrongCount * m.negativePerWrong;
+  const netMarks = Number((positiveMarks - negativeMarks).toFixed(2));
+
+  const takenSecs = Math.max(1, Math.round((Date.now() - m.startedAt) / 1000));
+  const mins = Math.floor(takenSecs / 60);
+  const secs = takenSecs % 60;
 
   const summary = [
-    "🟩 *Mock Test Complete — Result Summary*",
+    "🟩 *EXAM PAPER RESULT SUMMARY*",
+    `📚 Subject: *${m.subject}*`,
+    `📋 Type: *${m.label}*`,
     "━━━━━━━━━━━━━━━━━━━━",
-    `✅ Sahi (Correct): ${correctCount}`,
-    `❌ Galat (Wrong): ${wrongCount}`,
-    `⏭️ Chhode (Skipped): ${skippedCount}`,
-    `📊 Total Questions: ${m.questions.length}`,
+    `🏆 Net Score: *${netMarks} / ${m.totalMarks}*`,
+    `➕ Positive Marks: *+${positiveMarks.toFixed(2)}*`,
+    `➖ Negative Marks (-1/3): *-${negativeMarks.toFixed(2)}*`,
+    `⏱️ Time Taken: *${mins}m ${secs}s* (Limit: ${m.timeLabel})`,
+    `✅ Sahi (Correct): *${correctCount}*`,
+    `❌ Galat (Wrong): *${wrongCount}*`,
+    `⏭️ Chhode (Skipped): *${skippedCount}*`,
+    `📊 Total Questions: *${m.questions.length}*`,
     "━━━━━━━━━━━━━━━━━━━━",
     "",
-    "*Question-wise Result:*",
+    "*Question-wise Answer Key & Review:*",
     ...reviewLines,
   ].join("\n");
 
-  // Telegram message length limit (~4096 chars) ke hisaab se safe chunks
-  const chunkSize = 3500;
-  for (let i = 0; i < summary.length; i += chunkSize) {
-    const part = summary.slice(i, i + chunkSize);
-    const isLast = i + chunkSize >= summary.length;
+  await replacePage(
+    ctx,
+    summary.slice(0, 3500),
+    summary.length <= 3500 ? inlineMenuKeyboard() : undefined
+  );
+  for (let i = 3500; i < summary.length; i += 3500) {
+    const part = summary.slice(i, i + 3500);
+    const isLast = i + 3500 >= summary.length;
     await ctx.reply(part, isLast ? inlineMenuKeyboard() : undefined);
   }
 }
 
-bot.action("menu_pyq", async (ctx) => {
-  await ctx.answerCbQuery();
-  try {
-    await ctx.reply("🟩 Gemini AI se PYQs taiyar kiye ja rahe hain...");
-    const aiText = await askGemini(
-      `Provide 5 important Previous Year Questions (PYQs) across Pharmaceutical analysis & organic chemistry, Human anatomy & physiology 1, Pharmaceutics, Pharmacognosy, and Python, each with its answer and brief explanation.`
-    );
-    await ctx.reply(`🟩 *PYQ (Gemini AI)*\n\n${aiText}`, inlineMenuKeyboard());
-  } catch (err) {
-    await ctx.reply(`PYQ error: ${err.message}`);
-  }
-});
-
 bot.action("menu_mock", async (ctx) => {
   await ctx.answerCbQuery();
-  const s = getSession(ctx.from.id);
-  try {
-    await ctx.reply(
-      "🟩 Gemini AI se 20 questions ka Mock Test set ban raha hai, kripya thoda wait karein..."
-    );
-    const questions = await generateMockSet(
-      SUBJECTS.join(", ")
-    );
-    s.mock = {
-      questions,
-      index: 0,
-      answers: [],
-    };
-    await sendMockQuestion(ctx, s);
-  } catch (err) {
-    await ctx.reply(`Mock Test error: ${err.message}`);
-  }
+  await replacePage(
+    ctx,
+    "🟩 *Mock Test — Subject Chunein:*",
+    subjectButtonsKeyboard("mock_subj", false)
+  );
 });
 
-for (let qIdx = 0; qIdx < 20; qIdx++) {
+for (let i = 0; i < SUBJECTS.length; i++) {
+  const subjectName = SUBJECTS[i];
+
+  bot.action(`mock_subj_${i}`, async (ctx) => {
+    await ctx.answerCbQuery();
+    const s = getSession(ctx.from.id);
+    s.pendingMockSubject = i;
+
+    const infoText = [
+      `🟩 *Mock Test — ${subjectName}*`,
+      "",
+      "Apna exam paper chunein:",
+      "• *Short Test (Unit-wise):* 40 Questions • 40 Marks • -1/3 Negative • *1 Hour*",
+      "• *Full Course Test:* 80 Questions • 80 Marks • -1/3 Negative • *3 Hours*",
+    ].join("\n");
+
+    await replacePage(ctx, infoText, mockModeKeyboard(i));
+  });
+
+  for (const modeKey of ["short", "full"]) {
+    bot.action(`mock_mode_${i}_${modeKey}`, async (ctx) => {
+      await ctx.answerCbQuery();
+      const s = getSession(ctx.from.id);
+      const cfg = MOCK_CONFIGS[modeKey];
+
+      try {
+        await replacePage(
+          ctx,
+          `🟩 *${subjectName}* ke liye *${cfg.label}* (${cfg.count} Q • ${cfg.totalMarks}M • -1/3 • ${cfg.timeLabel}) ban raha hai...`
+        );
+        const questions = await generateFullExamPaper(subjectName, modeKey, ctx);
+        s.mock = {
+          subject: subjectName,
+          label: cfg.label,
+          totalMarks: cfg.totalMarks,
+          marksPerQ: cfg.marksPerQ,
+          negativePerWrong: cfg.negativePerWrong,
+          durationMins: cfg.durationMins,
+          timeLabel: cfg.timeLabel,
+          startedAt: Date.now(),
+          questions,
+          index: 0,
+          answers: [],
+        };
+        await sendMockQuestion(ctx, s);
+      } catch (err) {
+        await ctx.reply(`Mock test error: ${err.message}`, mockModeKeyboard(i));
+      }
+    });
+  }
+}
+
+for (let qIdx = 0; qIdx < 80; qIdx++) {
   for (const opt of ["A", "B", "C", "D", "E"]) {
     bot.action(`mock_ans_${qIdx}_${opt}`, async (ctx) => {
-      await ctx.answerCbQuery(opt === "E" ? "Question chhod diya gaya" : `Option ${opt} chuna gaya`);
+      await ctx.answerCbQuery(
+        opt === "E" ? "Question chhod diya gaya" : `Option ${opt} chuna gaya`
+      );
       const s = getSession(ctx.from.id);
       if (!s.mock || s.mock.index !== qIdx) return;
 
@@ -452,9 +665,16 @@ for (let qIdx = 0; qIdx < 20; qIdx++) {
       }
     });
   }
+
+  bot.action(`mock_submit_${qIdx}`, async (ctx) => {
+    await ctx.answerCbQuery("Paper submit kiya ja raha hai...");
+    const s = getSession(ctx.from.id);
+    if (!s.mock) return;
+    await finishMockTest(ctx, s);
+  });
 }
 bot.command("reset", async (ctx) => {
-  sessions.set(ctx.from.id, { mock: null });
+  sessions.set(ctx.from.id, { mock: null, pendingMockSubject: null });
   await ctx.reply(
     "STUDY BOT session reset ho gaya. Naye links ya files bhejein.",
     inlineMenuKeyboard()
@@ -470,7 +690,11 @@ bot.command("status", async (ctx) => {
       `• Source ZIP URL: ${s.sourceZipUrl || "Not provided"}`,
       `• Website ZIP URL: ${s.websiteZipUrl || "Not provided"}`,
       `• Website URL: ${s.websiteUrl || "Not provided"}`,
-      `• Active Mock Test: ${s.mock ? `${s.mock.index + 1}/${s.mock.questions.length}` : "None"}`,
+      `• Active Mock Test: ${
+        s.mock
+          ? `${s.mock.subject} (${s.mock.label}) — ${s.mock.index + 1}/${s.mock.questions.length}`
+          : "None"
+      }`,
     ].join("\n"),
     inlineMenuKeyboard()
   );
