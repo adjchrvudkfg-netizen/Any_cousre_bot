@@ -101,7 +101,6 @@ async function mergeFilesToSinglePdf(items) {
 
   return Buffer.from(await mergedPdf.save());
 }
-
 async function askGemini(prompt) {
   if (!GEMINI_API_KEY) {
     throw new Error("GEMINI_API_KEY environment variable missing hai.");
@@ -139,6 +138,7 @@ async function askGemini(prompt) {
   }
   return text;
 }
+
 const studyStore = SUBJECTS.map(() =>
   DEFAULT_UNITS.map(() => ({
     notesText: "",
@@ -192,7 +192,6 @@ function getSession(userId) {
   if (!("awaitingYoutubeFor" in s)) s.awaitingYoutubeFor = null;
   return s;
 }
-
 async function replacePage(ctx, text, extra = {}) {
   try {
     const msgId = ctx.callbackQuery?.message?.message_id;
@@ -202,6 +201,7 @@ async function replacePage(ctx, text, extra = {}) {
   } catch (_) {}
   return ctx.reply(text, extra);
 }
+
 function isHttpUrl(str) {
   try {
     const u = new URL(str);
@@ -420,115 +420,6 @@ function parseSubjAndUnit(rawSubj, rawUnit) {
   return { sIdx, uIdx };
 }
 
-bot.start(async (ctx) => {
-  if (ctx.from?.id) {
-    sessions.set(ctx.from.id, createFreshSession());
-  }
-  await ctx.reply(buildStartMessage(ctx), inlineMenuKeyboard());
-});
-
-bot.action("back_main", async (ctx) => {
-  await ctx.answerCbQuery();
-  await replacePage(ctx, buildStartMessage(ctx), inlineMenuKeyboard());
-});
-
-bot.command("addnotes", async (ctx) => {
-  if (!isAdmin(ctx.from?.id)) {
-    return ctx.reply("Sirf admin hi notes add kar sakta hai.");
-  }
-  const payload = (ctx.message?.text || "").replace(/^\/addnotes\s*/i, "");
-  const parts = payload.split("|").map((p) => p.trim());
-  if (parts.length < 3) {
-    return ctx.reply(
-      "Format: /addnotes <subj_1_to_6> | <unit_1_to_5> | <notes text>"
-    );
-  }
-  try {
-    const { sIdx, uIdx } = parseSubjAndUnit(parts[0], parts[1]);
-    const noteBody = parts.slice(2).join(" | ");
-    const uData = getUnitData(sIdx, uIdx);
-    uData.notesText = uData.notesText
-      ? `${uData.notesText}\n\n${noteBody}`
-      : noteBody;
-
-    const s = getSession(ctx.from?.id);
-    s.activeSubj = sIdx;
-    s.activeUnit = uIdx;
-
-    await ctx.reply(
-      `🔵 Notes add ho gaye!\nSubject: ${SUBJECTS[sIdx]}\nUnit: ${DEFAULT_UNITS[uIdx]}\n\nAb is unit ke liye PDFs/Photos bhej kar /mergenotes ${sIdx + 1} | ${uIdx + 1} chala sakte hain.`
-    );
-  } catch (err) {
-    await ctx.reply(`Add notes error: ${err.message}`);
-  }
-});
-
-bot.command("addsyllabus", async (ctx) => {
-  if (!isAdmin(ctx.from?.id)) {
-    return ctx.reply("Sirf admin hi syllabus add kar sakta hai.");
-  }
-  const payload = (ctx.message?.text || "").replace(/^\/addsyllabus\s*/i, "");
-  const parts = payload.split("|").map((p) => p.trim());
-  if (parts.length < 3) {
-    return ctx.reply(
-      "Format: /addsyllabus <subj_1_to_6> | <unit_1_to_5> | <syllabus text>"
-    );
-  }
-  try {
-    const { sIdx, uIdx } = parseSubjAndUnit(parts[0], parts[1]);
-    const sylBody = parts.slice(2).join(" | ");
-    const uData = getUnitData(sIdx, uIdx);
-    uData.syllabusText = sylBody;
-
-    await ctx.reply(
-      `🟢 Syllabus update ho gaya!\nSubject: ${SUBJECTS[sIdx]}\nUnit: ${DEFAULT_UNITS[uIdx]}`
-    );
-  } catch (err) {
-    await ctx.reply(`Add syllabus error: ${err.message}`);
-  }
-});
-
-bot.command("addlecture", async (ctx) => {
-  if (!isAdmin(ctx.from?.id)) {
-    return ctx.reply("Sirf admin hi lecture add kar sakta hai.");
-  }
-  const payload = (ctx.message?.text || "").replace(/^\/addlecture\s*/i, "");
-  const parts = payload.split("|").map((p) => p.trim());
-  if (parts.length < 3) {
-    return ctx.reply(
-      "Format: /addlecture <subj_1_to_6> | <unit_1_to_5> | <lecture title> | <optional youtube_url>"
-    );
-  }
-  try {
-    const { sIdx, uIdx } = parseSubjAndUnit(parts[0], parts[1]);
-    const title = parts[2];
-    const ytUrl = parts[3] && isHttpUrl(parts[3]) ? parts[3] : "";
-    const uData = getUnitData(sIdx, uIdx);
-
-    uData.lectures.push({
-      title,
-      youtubeUrl: ytUrl,
-      videoFileId: "",
-    });
-    const lecIdx = uData.lectures.length - 1;
-
-    await ctx.reply(
-      [
-        `🟢 Lecture #${lecIdx + 1} add ho gaya!`,
-        `Subject: ${SUBJECTS[sIdx]}`,
-        `Unit: ${DEFAULT_UNITS[uIdx]}`,
-        `Title: ${title}`,
-        `YouTube: ${ytUrl || "Not set (abhi link bhej sakte hain)"}`,
-        "",
-        "Is lecture ka YouTube link ya video file bhejne ke liye neeche buttons use karein:",
-      ].join("\n"),
-      lectureDetailKeyboard(sIdx, uIdx, lecIdx)
-    );
-  } catch (err) {
-    await ctx.reply(`Add lecture error: ${err.message}`);
-  }
-});
-
 async function mergeAndSendUnitNotes(ctx, sIdx, uIdx) {
   const uData = getUnitData(sIdx, uIdx);
   if (!uData.noteFiles.length) {
@@ -555,286 +446,175 @@ async function mergeAndSendUnitNotes(ctx, sIdx, uIdx) {
   );
 }
 
-bot.command("mergenotes", async (ctx) => {
-  if (!isAdmin(ctx.from?.id)) {
-    return ctx.reply("Sirf admin hi notes merge kar sakta hai.");
+async function handleAdminTextCommand(ctx, text) {
+  if (text.startsWith("/start")) {
+    if (ctx.from?.id) {
+      sessions.set(ctx.from.id, createFreshSession());
+    }
+    await ctx.reply(buildStartMessage(ctx), inlineMenuKeyboard());
+    return true;
   }
-  const s = getSession(ctx.from?.id);
-  const payload = (ctx.message?.text || "").replace(/^\/mergenotes\s*/i, "").trim();
 
-  let sIdx = s.activeSubj ?? 0;
-  let uIdx = s.activeUnit ?? 0;
+  if (text.startsWith("/reset")) {
+    if (ctx.from?.id) {
+      sessions.set(ctx.from.id, createFreshSession());
+    }
+    await ctx.reply(
+      "STUDY BOT session reset ho gaya. Naye links ya files bhejein.",
+      inlineMenuKeyboard()
+    );
+    return true;
+  }
 
-  if (payload) {
+  if (text.startsWith("/status")) {
+    const s = getSession(ctx.from?.id);
+    const uData = getUnitData(s.activeSubj ?? 0, s.activeUnit ?? 0);
+    await ctx.reply(
+      [
+        "STUDY BOT Session Status:",
+        `• Active Subject: ${SUBJECTS[s.activeSubj ?? 0]}`,
+        `• Active Unit: ${DEFAULT_UNITS[s.activeUnit ?? 0]}`,
+        `• Staged Unit Note Files (PDF/Photo): ${uData.noteFiles.length}`,
+        `• Unit Lectures Count: ${uData.lectures.length}`,
+        `• APK URL: ${s.apkUrl || "Pending"}`,
+        `• Source ZIP URL: ${s.sourceZipUrl || "Not provided"}`,
+        `• Website ZIP URL: ${s.websiteZipUrl || "Not provided"}`,
+        `• Website URL: ${s.websiteUrl || "Not provided"}`,
+      ].join("\n"),
+      inlineMenuKeyboard()
+    );
+    return true;
+  }
+
+  if (text.startsWith("/addnotes")) {
+    if (!isAdmin(ctx.from?.id)) {
+      await ctx.reply("Sirf admin hi notes add kar sakta hai.");
+      return true;
+    }
+    const payload = text.replace(/^\/addnotes\s*/i, "");
     const parts = payload.split("|").map((p) => p.trim());
-    if (parts.length >= 2) {
-      const parsed = parseSubjAndUnit(parts[0], parts[1]);
-      sIdx = parsed.sIdx;
-      uIdx = parsed.uIdx;
+    if (parts.length < 3) {
+      await ctx.reply(
+        "Format: /addnotes <subj_1_to_6> | <unit_1_to_5> | <notes text>"
+      );
+      return true;
     }
-  }
-
-  try {
-    await mergeAndSendUnitNotes(ctx, sIdx, uIdx);
-  } catch (err) {
-    await ctx.reply(`Merge notes error: ${err.message}`);
-  }
-});
-bot.action("menu_notes", async (ctx) => {
-  await ctx.answerCbQuery();
-  await replacePage(
-    ctx,
-    "🔵 Notes — Subject Chunein:",
-    subjectButtonsKeyboard("notes_subj", true)
-  );
-});
-
-bot.action("menu_syllabus", async (ctx) => {
-  await ctx.answerCbQuery();
-  await replacePage(
-    ctx,
-    "🟢 Syllabus — Subject Chunein:",
-    subjectButtonsKeyboard("syl_subj", false)
-  );
-});
-
-bot.action("menu_lecture", async (ctx) => {
-  await ctx.answerCbQuery();
-  await replacePage(
-    ctx,
-    "🟢 Lecture — Subject Chunein:",
-    subjectButtonsKeyboard("lec_subj", false)
-  );
-});
-
-bot.action("menu_pyq", async (ctx) => {
-  await ctx.answerCbQuery();
-  await replacePage(
-    ctx,
-    "🟢 PYQ (Pehle Exam Mein Aaye Hue Questions) — Subject Chunein:",
-    subjectButtonsKeyboard("pyq_subj", false)
-  );
-});
-
-for (let i = 0; i < SUBJECTS.length; i++) {
-  const subjectName = SUBJECTS[i];
-
-  bot.action(`notes_subj_${i}`, async (ctx) => {
-    await ctx.answerCbQuery();
-    const s = getSession(ctx.from?.id);
-    s.activeSubj = i;
-    await replacePage(
-      ctx,
-      `🔵 Notes: ${subjectName}\nUnit chunein (ya is subject ki unit files merge karein):`,
-      unitButtonsKeyboard("notes_unit", i, true)
-    );
-  });
-
-  bot.action(`merge_notes_btn_${i}`, async (ctx) => {
-    await ctx.answerCbQuery();
-    const s = getSession(ctx.from?.id);
     try {
-      await mergeAndSendUnitNotes(ctx, i, s.activeUnit ?? 0);
-    } catch (err) {
-      await ctx.reply(`Merge error: ${err.message}`);
-    }
-  });
-
-  bot.action(`syl_subj_${i}`, async (ctx) => {
-    await ctx.answerCbQuery();
-    await replacePage(
-      ctx,
-      `🟢 Syllabus: ${subjectName}\nUnit chunein:`,
-      unitButtonsKeyboard("syl_unit", i, false)
-    );
-  });
-
-  bot.action(`lec_subj_${i}`, async (ctx) => {
-    await ctx.answerCbQuery();
-    await replacePage(
-      ctx,
-      `🟢 Lecture: ${subjectName}\nUnit chunein:`,
-      unitButtonsKeyboard("lec_unit", i, false)
-    );
-  });
-
-  bot.action(`pyq_subj_${i}`, async (ctx) => {
-    await ctx.answerCbQuery();
-    try {
-      await replacePage(
-        ctx,
-        `🟢 ${subjectName} ke pehle exam mein aaye hue PYQs nikaale ja rahe hain...`
-      );
-      const aiText = await askGemini(
-        [
-          `List ONLY authentic past examination questions (PYQs) that have previously appeared in exams for "${subjectName}".`,
-          `Do NOT invent fresh hypothetical mock questions; present established past exam questions with their exam/year context (if known), clear answer, and short explanation.`,
-        ].join("\n")
-      );
-      await replacePage(
-        ctx,
-        `🟢 Past Exam PYQs: ${subjectName}\n\n${aiText}`,
-        subjectButtonsKeyboard("pyq_subj", false)
-      );
-    } catch (err) {
-      await replacePage(
-        ctx,
-        `PYQ error: ${err.message}`,
-        subjectButtonsKeyboard("pyq_subj", false)
-      );
-    }
-  });
-
-  for (let u = 0; u < DEFAULT_UNITS.length; u++) {
-    const unitLabel = DEFAULT_UNITS[u];
-
-    bot.action(`notes_unit_${i}_${u}`, async (ctx) => {
-      await ctx.answerCbQuery();
+      const { sIdx, uIdx } = parseSubjAndUnit(parts[0], parts[1]);
+      const noteBody = parts.slice(2).join(" | ");
+      const uData = getUnitData(sIdx, uIdx);
+      uData.notesText = uData.notesText
+        ? `${uData.notesText}\n\n${noteBody}`
+        : noteBody;
       const s = getSession(ctx.from?.id);
-      s.activeSubj = i;
-      s.activeUnit = u;
-
-      const uData = getUnitData(i, u);
-      if (uData.noteFiles.length > 0) {
-        try {
-          await mergeAndSendUnitNotes(ctx, i, u);
-          return;
-        } catch (err) {
-          await ctx.reply(`PDF merge error: ${err.message}`);
-        }
-      }
-
-      if (uData.notesText) {
-        return replacePage(
-          ctx,
-          `🔵 Notes: ${subjectName} (${unitLabel})\n\n${uData.notesText}`,
-          unitButtonsKeyboard("notes_unit", i, true)
-        );
-      }
-
-      try {
-        await replacePage(
-          ctx,
-          `🔵 ${subjectName} (${unitLabel}) ke notes taiyar kiye ja rahe hain...`
-        );
-        const aiText = await askGemini(
-          `Create concise, well-structured revision notes for "${unitLabel}" of "${subjectName}".`
-        );
-        await replacePage(
-          ctx,
-          `🔵 Notes: ${subjectName} (${unitLabel})\n\n${aiText}`,
-          unitButtonsKeyboard("notes_unit", i, true)
-        );
-      } catch (err) {
-        await replacePage(
-          ctx,
-          `Notes error: ${err.message}`,
-          unitButtonsKeyboard("notes_unit", i, true)
-        );
-      }
-    });
-
-    bot.action(`syl_unit_${i}_${u}`, async (ctx) => {
-      await ctx.answerCbQuery();
-      const uData = getUnitData(i, u);
-      if (uData.syllabusText) {
-        return replacePage(
-          ctx,
-          `🟢 Syllabus: ${subjectName} (${unitLabel})\n\n${uData.syllabusText}`,
-          unitButtonsKeyboard("syl_unit", i, false)
-        );
-      }
-
-      try {
-        await replacePage(
-          ctx,
-          `🟢 ${subjectName} (${unitLabel}) ka syllabus load ho raha hai...`
-        );
-        const aiText = await askGemini(
-          `Provide the detailed syllabus topics for "${unitLabel}" of "${subjectName}".`
-        );
-        await replacePage(
-          ctx,
-          `🟢 Syllabus: ${subjectName} (${unitLabel})\n\n${aiText}`,
-          unitButtonsKeyboard("syl_unit", i, false)
-        );
-      } catch (err) {
-        await replacePage(
-          ctx,
-          `Syllabus error: ${err.message}`,
-          unitButtonsKeyboard("syl_unit", i, false)
-        );
-      }
-    });
-
-    bot.action(`lec_unit_${i}_${u}`, async (ctx) => {
-      await ctx.answerCbQuery();
-      const uData = getUnitData(i, u);
-      const count = uData.lectures.length;
-
-      const text =
-        count > 0
-          ? `🟢 Lectures: ${subjectName} (${unitLabel})\nKul Lectures: ${count}\n\nKisi lecture par tap karein:`
-          : `🟢 Lectures: ${subjectName} (${unitLabel})\nIs unit mein abhi koi lecture add nahi hua hai.\nAdmin /addlecture ${i + 1} | ${u + 1} | <Title> | <YouTube_URL> se add kar sakta hai.`;
-
-      await replacePage(ctx, text, lectureListKeyboard(i, u));
-    });
-
-    for (let l = 0; l < 50; l++) {
-      bot.action(`open_lec_${i}_${u}_${l}`, async (ctx) => {
-        await ctx.answerCbQuery();
-        const uData = getUnitData(i, u);
-        const lec = uData.lectures[l];
-        if (!lec) return;
-
-        if (lec.videoFileId) {
-          await ctx.replyWithVideo(lec.videoFileId, {
-            caption: `🟢 ${lec.title}\nSubject: ${subjectName} • ${unitLabel}${
-              lec.youtubeUrl ? `\nYouTube: ${lec.youtubeUrl}` : ""
-            }`,
-            ...lectureDetailKeyboard(i, u, l),
-          });
-          return;
-        }
-
-        const msg = [
-          `🟢 ${lec.title}`,
-          `Subject: ${subjectName}`,
-          `Unit: ${unitLabel}`,
-          `YouTube Link: ${lec.youtubeUrl || "Not provided"}`,
-          `Uploaded Video: ${lec.videoFileId ? "Available" : "Not uploaded"}`,
-        ].join("\n");
-
-        await replacePage(ctx, msg, lectureDetailKeyboard(i, u, l));
-      });
-
-      bot.action(`set_yt_${i}_${u}_${l}`, async (ctx) => {
-        await ctx.answerCbQuery();
-        if (!isAdmin(ctx.from?.id)) {
-          return ctx.reply("Sirf admin hi YouTube link set kar sakta hai.");
-        }
-        const s = getSession(ctx.from?.id);
-        s.awaitingYoutubeFor = { subjIdx: i, unitIdx: u, lecIdx: l };
-        s.awaitingLectureVideoFor = null;
-        await ctx.reply(
-          `🟢 ${getUnitData(i, u).lectures[l]?.title || "Lecture"} ke liye YouTube link bhejein:`
-        );
-      });
-
-      bot.action(`set_vid_${i}_${u}_${l}`, async (ctx) => {
-        await ctx.answerCbQuery();
-        if (!isAdmin(ctx.from?.id)) {
-          return ctx.reply("Sirf admin hi video upload kar sakta hai.");
-        }
-        const s = getSession(ctx.from?.id);
-        s.awaitingLectureVideoFor = { subjIdx: i, unitIdx: u, lecIdx: l };
-        s.awaitingYoutubeFor = null;
-        await ctx.reply(
-          `🟢 ${getUnitData(i, u).lectures[l]?.title || "Lecture"} ke liye video file bhejein:`
-        );
-      });
+      s.activeSubj = sIdx;
+      s.activeUnit = uIdx;
+      await ctx.reply(
+        `🔵 Notes add ho gaye!\nSubject: ${SUBJECTS[sIdx]}\nUnit: ${DEFAULT_UNITS[uIdx]}\n\nAb is unit ke liye PDFs/Photos bhej kar /mergenotes ${sIdx + 1} | ${uIdx + 1} chala sakte hain.`
+      );
+    } catch (err) {
+      await ctx.reply(`Add notes error: ${err.message}`);
     }
+    return true;
   }
+
+  if (text.startsWith("/addsyllabus")) {
+    if (!isAdmin(ctx.from?.id)) {
+      await ctx.reply("Sirf admin hi syllabus add kar sakta hai.");
+      return true;
+    }
+    const payload = text.replace(/^\/addsyllabus\s*/i, "");
+    const parts = payload.split("|").map((p) => p.trim());
+    if (parts.length < 3) {
+      await ctx.reply(
+        "Format: /addsyllabus <subj_1_to_6> | <unit_1_to_5> | <syllabus text>"
+      );
+      return true;
+    }
+    try {
+      const { sIdx, uIdx } = parseSubjAndUnit(parts[0], parts[1]);
+      const sylBody = parts.slice(2).join(" | ");
+      const uData = getUnitData(sIdx, uIdx);
+      uData.syllabusText = sylBody;
+      await ctx.reply(
+        `🟢 Syllabus update ho gaya!\nSubject: ${SUBJECTS[sIdx]}\nUnit: ${DEFAULT_UNITS[uIdx]}`
+      );
+    } catch (err) {
+      await ctx.reply(`Add syllabus error: ${err.message}`);
+    }
+    return true;
+  }
+
+  if (text.startsWith("/addlecture")) {
+    if (!isAdmin(ctx.from?.id)) {
+      await ctx.reply("Sirf admin hi lecture add kar sakta hai.");
+      return true;
+    }
+    const payload = text.replace(/^\/addlecture\s*/i, "");
+    const parts = payload.split("|").map((p) => p.trim());
+    if (parts.length < 3) {
+      await ctx.reply(
+        "Format: /addlecture <subj_1_to_6> | <unit_1_to_5> | <lecture title> | <optional youtube_url>"
+      );
+      return true;
+    }
+    try {
+      const { sIdx, uIdx } = parseSubjAndUnit(parts[0], parts[1]);
+      const title = parts[2];
+      const ytUrl = parts[3] && isHttpUrl(parts[3]) ? parts[3] : "";
+      const uData = getUnitData(sIdx, uIdx);
+
+      uData.lectures.push({
+        title,
+        youtubeUrl: ytUrl,
+        videoFileId: "",
+      });
+      const lecIdx = uData.lectures.length - 1;
+
+      await ctx.reply(
+        [
+          `🟢 Lecture #${lecIdx + 1} add ho gaya!`,
+          `Subject: ${SUBJECTS[sIdx]}`,
+          `Unit: ${DEFAULT_UNITS[uIdx]}`,
+          `Title: ${title}`,
+          `YouTube: ${ytUrl || "Not set (abhi link bhej sakte hain)"}`,
+          "",
+          "Is lecture ka YouTube link ya video file bhejne ke liye neeche buttons use karein:",
+        ].join("\n"),
+        lectureDetailKeyboard(sIdx, uIdx, lecIdx)
+      );
+    } catch (err) {
+      await ctx.reply(`Add lecture error: ${err.message}`);
+    }
+    return true;
+  }
+
+  if (text.startsWith("/mergenotes")) {
+    if (!isAdmin(ctx.from?.id)) {
+      await ctx.reply("Sirf admin hi notes merge kar sakta hai.");
+      return true;
+    }
+    const s = getSession(ctx.from?.id);
+    const payload = text.replace(/^\/mergenotes\s*/i, "").trim();
+    let sIdx = s.activeSubj ?? 0;
+    let uIdx = s.activeUnit ?? 0;
+    if (payload) {
+      const parts = payload.split("|").map((p) => p.trim());
+      if (parts.length >= 2) {
+        const parsed = parseSubjAndUnit(parts[0], parts[1]);
+        sIdx = parsed.sIdx;
+        uIdx = parsed.uIdx;
+      }
+    }
+    try {
+      await mergeAndSendUnitNotes(ctx, sIdx, uIdx);
+    } catch (err) {
+      await ctx.reply(`Merge notes error: ${err.message}`);
+    }
+    return true;
+  }
+
+  return false;
 }
 const MOCK_CONFIGS = {
   short: {
@@ -941,7 +721,10 @@ async function sendMockQuestion(ctx, s) {
     return finishMockTest(ctx, s);
   }
 
-  const elapsedMins = Math.max(0, Math.floor((Date.now() - m.startedAt) / 60000));
+  const elapsedMins = Math.max(
+    0,
+    Math.floor((Date.now() - m.startedAt) / 60000)
+  );
   if (elapsedMins >= m.durationMins) {
     await ctx.reply("⏱️ Time over! Aapka paper auto-submit ho raha hai.");
     return finishMockTest(ctx, s);
@@ -1035,22 +818,319 @@ async function finishMockTest(ctx, s) {
     await ctx.reply(part, isLast ? inlineMenuKeyboard() : undefined);
   }
 }
+async function handleCallbackData(ctx, data) {
+  await ctx.answerCbQuery().catch(() => {});
+  const s = getSession(ctx.from?.id);
 
-bot.action("menu_mock", async (ctx) => {
-  await ctx.answerCbQuery();
-  await replacePage(
-    ctx,
-    "🟢 Mock Test — Subject Chunein:",
-    subjectButtonsKeyboard("mock_subj", false)
-  );
-});
+  if (data === "back_main") {
+    await replacePage(ctx, buildStartMessage(ctx), inlineMenuKeyboard());
+    return true;
+  }
 
-for (let i = 0; i < SUBJECTS.length; i++) {
-  const subjectName = SUBJECTS[i];
+  if (data === "menu_notes") {
+    await replacePage(
+      ctx,
+      "🔵 Notes — Subject Chunein:",
+      subjectButtonsKeyboard("notes_subj", true)
+    );
+    return true;
+  }
 
-  bot.action(`mock_subj_${i}`, async (ctx) => {
-    await ctx.answerCbQuery();
-    const s = getSession(ctx.from?.id);
+  if (data === "menu_syllabus") {
+    await replacePage(
+      ctx,
+      "🟢 Syllabus — Subject Chunein:",
+      subjectButtonsKeyboard("syl_subj", false)
+    );
+    return true;
+  }
+
+  if (data === "menu_lecture") {
+    await replacePage(
+      ctx,
+      "🟢 Lecture — Subject Chunein:",
+      subjectButtonsKeyboard("lec_subj", false)
+    );
+    return true;
+  }
+
+  if (data === "menu_pyq") {
+    await replacePage(
+      ctx,
+      "🟢 PYQ (Pehle Exam Mein Aaye Hue Questions) — Subject Chunein:",
+      subjectButtonsKeyboard("pyq_subj", false)
+    );
+    return true;
+  }
+
+  if (data === "menu_mock") {
+    await replacePage(
+      ctx,
+      "🟢 Mock Test — Subject Chunein:",
+      subjectButtonsKeyboard("mock_subj", false)
+    );
+    return true;
+  }
+
+  if (data.startsWith("notes_subj_")) {
+    const i = Number(data.replace("notes_subj_", ""));
+    const subjectName = SUBJECTS[i];
+    if (!subjectName) return true;
+    s.activeSubj = i;
+    await replacePage(
+      ctx,
+      `🔵 Notes: ${subjectName}\nUnit chunein (ya is subject ki unit files merge karein):`,
+      unitButtonsKeyboard("notes_unit", i, true)
+    );
+    return true;
+  }
+
+  if (data.startsWith("merge_notes_btn_")) {
+    const i = Number(data.replace("merge_notes_btn_", ""));
+    try {
+      await mergeAndSendUnitNotes(ctx, i, s.activeUnit ?? 0);
+    } catch (err) {
+      await ctx.reply(`Merge error: ${err.message}`);
+    }
+    return true;
+  }
+
+  if (data.startsWith("syl_subj_")) {
+    const i = Number(data.replace("syl_subj_", ""));
+    const subjectName = SUBJECTS[i];
+    if (!subjectName) return true;
+    await replacePage(
+      ctx,
+      `🟢 Syllabus: ${subjectName}\nUnit chunein:`,
+      unitButtonsKeyboard("syl_unit", i, false)
+    );
+    return true;
+  }
+
+  if (data.startsWith("lec_subj_")) {
+    const i = Number(data.replace("lec_subj_", ""));
+    const subjectName = SUBJECTS[i];
+    if (!subjectName) return true;
+    await replacePage(
+      ctx,
+      `🟢 Lecture: ${subjectName}\nUnit chunein:`,
+      unitButtonsKeyboard("lec_unit", i, false)
+    );
+    return true;
+  }
+
+  if (data.startsWith("pyq_subj_")) {
+    const i = Number(data.replace("pyq_subj_", ""));
+    const subjectName = SUBJECTS[i];
+    if (!subjectName) return true;
+    try {
+      await replacePage(
+        ctx,
+        `🟢 ${subjectName} ke pehle exam mein aaye hue PYQs nikaale ja rahe hain...`
+      );
+      const aiText = await askGemini(
+        [
+          `List ONLY authentic past examination questions (PYQs) that have previously appeared in exams for "${subjectName}".`,
+          `Do NOT invent fresh hypothetical mock questions; present established past exam questions with their exam/year context (if known), clear answer, and short explanation.`,
+        ].join("\n")
+      );
+      await replacePage(
+        ctx,
+        `🟢 Past Exam PYQs: ${subjectName}\n\n${aiText}`,
+        subjectButtonsKeyboard("pyq_subj", false)
+      );
+    } catch (err) {
+      await replacePage(
+        ctx,
+        `PYQ error: ${err.message}`,
+        subjectButtonsKeyboard("pyq_subj", false)
+      );
+    }
+    return true;
+  }
+
+  if (data.startsWith("notes_unit_")) {
+    const [, , iStr, uStr] = data.split("_");
+    const i = Number(iStr);
+    const u = Number(uStr);
+    const subjectName = SUBJECTS[i];
+    const unitLabel = DEFAULT_UNITS[u];
+    if (!subjectName || !unitLabel) return true;
+
+    s.activeSubj = i;
+    s.activeUnit = u;
+    const uData = getUnitData(i, u);
+
+    if (uData.noteFiles.length > 0) {
+      try {
+        await mergeAndSendUnitNotes(ctx, i, u);
+        return true;
+      } catch (err) {
+        await ctx.reply(`PDF merge error: ${err.message}`);
+      }
+    }
+
+    if (uData.notesText) {
+      await replacePage(
+        ctx,
+        `🔵 Notes: ${subjectName} (${unitLabel})\n\n${uData.notesText}`,
+        unitButtonsKeyboard("notes_unit", i, true)
+      );
+      return true;
+    }
+
+    try {
+      await replacePage(
+        ctx,
+        `🔵 ${subjectName} (${unitLabel}) ke notes taiyar kiye ja rahe hain...`
+      );
+      const aiText = await askGemini(
+        `Create concise, well-structured revision notes for "${unitLabel}" of "${subjectName}".`
+      );
+      await replacePage(
+        ctx,
+        `🔵 Notes: ${subjectName} (${unitLabel})\n\n${aiText}`,
+        unitButtonsKeyboard("notes_unit", i, true)
+      );
+    } catch (err) {
+      await replacePage(
+        ctx,
+        `Notes error: ${err.message}`,
+        unitButtonsKeyboard("notes_unit", i, true)
+      );
+    }
+    return true;
+  }
+
+  if (data.startsWith("syl_unit_")) {
+    const [, , iStr, uStr] = data.split("_");
+    const i = Number(iStr);
+    const u = Number(uStr);
+    const subjectName = SUBJECTS[i];
+    const unitLabel = DEFAULT_UNITS[u];
+    if (!subjectName || !unitLabel) return true;
+
+    const uData = getUnitData(i, u);
+    if (uData.syllabusText) {
+      await replacePage(
+        ctx,
+        `🟢 Syllabus: ${subjectName} (${unitLabel})\n\n${uData.syllabusText}`,
+        unitButtonsKeyboard("syl_unit", i, false)
+      );
+      return true;
+    }
+
+    try {
+      await replacePage(
+        ctx,
+        `🟢 ${subjectName} (${unitLabel}) ka syllabus load ho raha hai...`
+      );
+      const aiText = await askGemini(
+        `Provide the detailed syllabus topics for "${unitLabel}" of "${subjectName}".`
+      );
+      await replacePage(
+        ctx,
+        `🟢 Syllabus: ${subjectName} (${unitLabel})\n\n${aiText}`,
+        unitButtonsKeyboard("syl_unit", i, false)
+      );
+    } catch (err) {
+      await replacePage(
+        ctx,
+        `Syllabus error: ${err.message}`,
+        unitButtonsKeyboard("syl_unit", i, false)
+      );
+    }
+    return true;
+  }
+
+  if (data.startsWith("lec_unit_")) {
+    const [, , iStr, uStr] = data.split("_");
+    const i = Number(iStr);
+    const u = Number(uStr);
+    const subjectName = SUBJECTS[i];
+    const unitLabel = DEFAULT_UNITS[u];
+    if (!subjectName || !unitLabel) return true;
+
+    const uData = getUnitData(i, u);
+    const count = uData.lectures.length;
+    const text =
+      count > 0
+        ? `🟢 Lectures: ${subjectName} (${unitLabel})\nKul Lectures: ${count}\n\nKisi lecture par tap karein:`
+        : `🟢 Lectures: ${subjectName} (${unitLabel})\nIs unit mein abhi koi lecture add nahi hua hai.\nAdmin /addlecture ${i + 1} | ${u + 1} | <Title> | <YouTube_URL> se add kar sakta hai.`;
+
+    await replacePage(ctx, text, lectureListKeyboard(i, u));
+    return true;
+  }
+
+  if (data.startsWith("open_lec_")) {
+    const [, , iStr, uStr, lStr] = data.split("_");
+    const i = Number(iStr);
+    const u = Number(uStr);
+    const l = Number(lStr);
+    const uData = getUnitData(i, u);
+    const lec = uData.lectures[l];
+    if (!lec) return true;
+
+    if (lec.videoFileId) {
+      await ctx.replyWithVideo(lec.videoFileId, {
+        caption: `🟢 ${lec.title}\nSubject: ${SUBJECTS[i]} • ${DEFAULT_UNITS[u]}${
+          lec.youtubeUrl ? `\nYouTube: ${lec.youtubeUrl}` : ""
+        }`,
+        ...lectureDetailKeyboard(i, u, l),
+      });
+      return true;
+    }
+
+    const msg = [
+      `🟢 ${lec.title}`,
+      `Subject: ${SUBJECTS[i]}`,
+      `Unit: ${DEFAULT_UNITS[u]}`,
+      `YouTube Link: ${lec.youtubeUrl || "Not provided"}`,
+      `Uploaded Video: ${lec.videoFileId ? "Available" : "Not uploaded"}`,
+    ].join("\n");
+
+    await replacePage(ctx, msg, lectureDetailKeyboard(i, u, l));
+    return true;
+  }
+
+  if (data.startsWith("set_yt_")) {
+    const [, , iStr, uStr, lStr] = data.split("_");
+    const i = Number(iStr);
+    const u = Number(uStr);
+    const l = Number(lStr);
+    if (!isAdmin(ctx.from?.id)) {
+      await ctx.reply("Sirf admin hi YouTube link set kar sakta hai.");
+      return true;
+    }
+    s.awaitingYoutubeFor = { subjIdx: i, unitIdx: u, lecIdx: l };
+    s.awaitingLectureVideoFor = null;
+    await ctx.reply(
+      `🟢 ${getUnitData(i, u).lectures[l]?.title || "Lecture"} ke liye YouTube link bhejein:`
+    );
+    return true;
+  }
+
+  if (data.startsWith("set_vid_")) {
+    const [, , iStr, uStr, lStr] = data.split("_");
+    const i = Number(iStr);
+    const u = Number(uStr);
+    const l = Number(lStr);
+    if (!isAdmin(ctx.from?.id)) {
+      await ctx.reply("Sirf admin hi video upload kar sakta hai.");
+      return true;
+    }
+    s.awaitingLectureVideoFor = { subjIdx: i, unitIdx: u, lecIdx: l };
+    s.awaitingYoutubeFor = null;
+    await ctx.reply(
+      `🟢 ${getUnitData(i, u).lectures[l]?.title || "Lecture"} ke liye video file bhejein:`
+    );
+    return true;
+  }
+
+  if (data.startsWith("mock_subj_")) {
+    const i = Number(data.replace("mock_subj_", ""));
+    const subjectName = SUBJECTS[i];
+    if (!subjectName) return true;
     s.pendingMockSubject = i;
     await replacePage(
       ctx,
@@ -1063,378 +1143,369 @@ for (let i = 0; i < SUBJECTS.length; i++) {
       ].join("\n"),
       mockModeKeyboard(i)
     );
-  });
-
-  for (const modeKey of ["short", "full"]) {
-    bot.action(`mock_mode_${i}_${modeKey}`, async (ctx) => {
-      await ctx.answerCbQuery();
-      const s = getSession(ctx.from?.id);
-      const cfg = MOCK_CONFIGS[modeKey];
-      try {
-        await replacePage(
-          ctx,
-          `🟢 ${subjectName} ke liye ${cfg.label} (${cfg.count} Q • ${cfg.totalMarks}M • -1/3 • ${cfg.timeLabel}) ban raha hai...`
-        );
-        const questions = await generateFullExamPaper(subjectName, modeKey, ctx);
-        s.mock = {
-          subject: subjectName,
-          label: cfg.label,
-          totalMarks: cfg.totalMarks,
-          marksPerQ: cfg.marksPerQ,
-          negativePerWrong: cfg.negativePerWrong,
-          durationMins: cfg.durationMins,
-          timeLabel: cfg.timeLabel,
-          startedAt: Date.now(),
-          questions,
-          index: 0,
-          answers: [],
-        };
-        await sendMockQuestion(ctx, s);
-      } catch (err) {
-        await replacePage(
-          ctx,
-          `Mock test error: ${err.message}`,
-          mockModeKeyboard(i)
-        );
-      }
-    });
+    return true;
   }
-}
 
-for (let qIdx = 0; qIdx < 80; qIdx++) {
-  for (const opt of ["A", "B", "C", "D", "E"]) {
-    bot.action(`mock_ans_${qIdx}_${opt}`, async (ctx) => {
-      await ctx.answerCbQuery(
-        opt === "E" ? "Question chhod diya gaya" : `Option ${opt} chuna gaya`
+  if (data.startsWith("mock_mode_")) {
+    const parts = data.split("_"); // mock, mode, i, modeKey
+    const i = Number(parts[2]);
+    const modeKey = parts[3];
+    const subjectName = SUBJECTS[i];
+    const cfg = MOCK_CONFIGS[modeKey];
+    if (!subjectName || !cfg) return true;
+
+    try {
+      await replacePage(
+        ctx,
+        `🟢 ${subjectName} ke liye ${cfg.label} (${cfg.count} Q • ${cfg.totalMarks}M • -1/3 • ${cfg.timeLabel}) ban raha hai...`
       );
-      const s = getSession(ctx.from?.id);
-      if (!s.mock || s.mock.index !== qIdx) return;
-
-      s.mock.answers[qIdx] = opt;
-      s.mock.index += 1;
-
-      if (s.mock.index < s.mock.questions.length) {
-        await sendMockQuestion(ctx, s);
-      } else {
-        await finishMockTest(ctx, s);
-      }
-    });
-  }
-
-  bot.action(`mock_submit_${qIdx}`, async (ctx) => {
-    await ctx.answerCbQuery("Paper submit kiya ja raha hai...");
-    const s = getSession(ctx.from?.id);
-    if (!s.mock) return;
-    await finishMockTest(ctx, s);
-  });
-}
-bot.command("reset", async (ctx) => {
-  if (ctx.from?.id) {
-    sessions.set(ctx.from.id, createFreshSession());
-  }
-  await ctx.reply(
-    "STUDY BOT session reset ho gaya. Naye links ya files bhejein.",
-    inlineMenuKeyboard()
-  );
-});
-
-bot.command("status", async (ctx) => {
-  const s = getSession(ctx.from?.id);
-  const uData = getUnitData(s.activeSubj ?? 0, s.activeUnit ?? 0);
-  await ctx.reply(
-    [
-      "STUDY BOT Session Status:",
-      `• Active Subject: ${SUBJECTS[s.activeSubj ?? 0]}`,
-      `• Active Unit: ${DEFAULT_UNITS[s.activeUnit ?? 0]}`,
-      `• Staged Unit Note Files (PDF/Photo): ${uData.noteFiles.length}`,
-      `• Unit Lectures Count: ${uData.lectures.length}`,
-      `• APK URL: ${s.apkUrl || "Pending"}`,
-      `• Source ZIP URL: ${s.sourceZipUrl || "Not provided"}`,
-      `• Website ZIP URL: ${s.websiteZipUrl || "Not provided"}`,
-      `• Website URL: ${s.websiteUrl || "Not provided"}`,
-    ].join("\n"),
-    inlineMenuKeyboard()
-  );
-});
-
-bot.on("photo", async (ctx) => {
-  const s = getSession(ctx.from?.id);
-  if (!isAdmin(ctx.from?.id)) return;
-
-  try {
-    const photos = ctx.message?.photo || [];
-    const largest = photos[photos.length - 1];
-    if (!largest) return;
-    const fileLink = await ctx.telegram.getFileLink(largest.file_id);
-    const uData = getUnitData(s.activeSubj ?? 0, s.activeUnit ?? 0);
-
-    uData.noteFiles.push({
-      name: `photo_${Date.now()}.jpg`,
-      url: fileLink.href,
-      mime: "image/jpeg",
-    });
-
-    await ctx.reply(
-      `🔵 Photo notes mein add ho gayi! (${DEFAULT_UNITS[s.activeUnit ?? 0]} • Total files: ${uData.noteFiles.length})\nAur PDF/Photo bhejein ya /mergenotes se ek PDF banayein.`
-    );
-  } catch (err) {
-    await ctx.reply(`Photo error: ${err.message}`);
-  }
-});
-
-bot.on("video", async (ctx) => {
-  const s = getSession(ctx.from?.id);
-  if (!isAdmin(ctx.from?.id)) return;
-
-  const target = s.awaitingLectureVideoFor;
-  if (!target) {
-    return ctx.reply(
-      "Kisi lecture par tap karke 'Upload / Update Video' chunein, phir video bhejein."
-    );
-  }
-
-  const uData = getUnitData(target.subjIdx, target.unitIdx);
-  const lec = uData.lectures[target.lecIdx];
-  if (!lec) return ctx.reply("Lecture nahi mila.");
-
-  lec.videoFileId = ctx.message.video.file_id;
-  s.awaitingLectureVideoFor = null;
-
-  await ctx.reply(
-    `🟢 Lecture "${lec.title}" ka video update ho gaya!`,
-    lectureDetailKeyboard(target.subjIdx, target.unitIdx, target.lecIdx)
-  );
-});
-
-bot.on("document", async (ctx) => {
-  const doc = ctx.message?.document;
-  if (!doc) return;
-  const fileName = (doc.file_name || "").toLowerCase();
-  const s = getSession(ctx.from?.id);
-
-  if (s.awaitingLectureVideoFor && isAdmin(ctx.from?.id)) {
-    const target = s.awaitingLectureVideoFor;
-    const uData = getUnitData(target.subjIdx, target.unitIdx);
-    const lec = uData.lectures[target.lecIdx];
-    if (lec) {
-      lec.videoFileId = doc.file_id;
-      s.awaitingLectureVideoFor = null;
-      return ctx.reply(
-        `🟢 Lecture "${lec.title}" ka video file update ho gaya!`,
-        lectureDetailKeyboard(target.subjIdx, target.unitIdx, target.lecIdx)
+      const questions = await generateFullExamPaper(subjectName, modeKey, ctx);
+      s.mock = {
+        subject: subjectName,
+        label: cfg.label,
+        totalMarks: cfg.totalMarks,
+        marksPerQ: cfg.marksPerQ,
+        negativePerWrong: cfg.negativePerWrong,
+        durationMins: cfg.durationMins,
+        timeLabel: cfg.timeLabel,
+        startedAt: Date.now(),
+        questions,
+        index: 0,
+        answers: [],
+      };
+      await sendMockQuestion(ctx, s);
+    } catch (err) {
+      await replacePage(
+        ctx,
+        `Mock test error: ${err.message}`,
+        mockModeKeyboard(i)
       );
     }
+    return true;
   }
 
-  if (fileName.endsWith(".pdf") && isAdmin(ctx.from?.id)) {
-    try {
-      const fileLink = await ctx.telegram.getFileLink(doc.file_id);
-      const uData = getUnitData(s.activeSubj ?? 0, s.activeUnit ?? 0);
-      uData.noteFiles.push({
-        name: doc.file_name || `notes_${Date.now()}.pdf`,
-        url: fileLink.href,
-        mime: "application/pdf",
-      });
+  if (data.startsWith("mock_ans_")) {
+    const parts = data.split("_"); // mock, ans, qIdx, opt
+    const qIdx = Number(parts[2]);
+    const opt = parts[3];
+    if (!s.mock || s.mock.index !== qIdx) return true;
 
-      return ctx.reply(
-        `🔵 PDF "${doc.file_name}" notes mein add ho gayi! (${DEFAULT_UNITS[s.activeUnit ?? 0]} • Total files: ${uData.noteFiles.length})\nAur PDF/Photo bhejein ya /mergenotes se ek single PDF banayein.`
+    s.mock.answers[qIdx] = opt;
+    s.mock.index += 1;
+
+    if (s.mock.index < s.mock.questions.length) {
+      await sendMockQuestion(ctx, s);
+    } else {
+      await finishMockTest(ctx, s);
+    }
+    return true;
+  }
+
+  if (data.startsWith("mock_submit_")) {
+    if (!s.mock) return true;
+    await finishMockTest(ctx, s);
+    return true;
+  }
+
+  return false;
+}
+async function handleBuildCommand(ctx, text) {
+  const s = getSession(ctx.from?.id);
+
+  if (text.startsWith("/source")) {
+    if (!s.apkUrl) {
+      await ctx.reply(
+        "Pehle .apk file ka direct https:// link bhejein, phir /source likhein."
+      );
+      return true;
+    }
+    const tagName = `source-${ctx.from?.id || "user"}-${Date.now()}`;
+    await ctx.reply(
+      "STUDY BOT APK source code extraction trigger kiya ja raha hai..."
+    );
+    try {
+      await dispatchWorkflow(SOURCE_WORKFLOW_FILE, {
+        apk_url: s.apkUrl,
+        tag_name: tagName,
+      });
+      await ctx.reply(
+        [
+          "Source extraction workflow trigger ho gaya!",
+          `Tag: ${tagName}`,
+          "GitHub Releases mein apk-source-code.zip banne ke baad uska link bhej kar /mergebuild use karein.",
+        ].join("\n")
       );
     } catch (err) {
-      return ctx.reply(`PDF upload error: ${err.message}`);
+      await ctx.reply(`Source error: ${err.message}`);
     }
+    return true;
   }
 
-  if ((doc.file_size || 0) > 20 * 1024 * 1024) {
-    return ctx.reply(
-      "Telegram bot 20 MB se badi file direct download nahi kar sakta. Kripya 1 GB tak ki file ka direct https:// download link bhejein."
-    );
-  }
-
-  if (!fileName.endsWith(".zip")) {
-    return ctx.reply(
-      "Badi .apk file ka direct https:// link bhejein, ya chhoti .zip file bhejein."
-    );
-  }
-
-  try {
-    const fileLink = await ctx.telegram.getFileLink(doc.file_id);
-    if (fileName.includes("source")) {
-      s.sourceZipUrl = fileLink.href;
-      return ctx.reply(
-        "Source ZIP link STUDY BOT session mein save ho gaya. Ab website panel ZIP/link bhej kar /mergebuild likhein."
+  if (text.startsWith("/mergebuild")) {
+    if (!s.sourceZipUrl) {
+      await ctx.reply("Pehle extracted source code ZIP ka https:// link bhejein.");
+      return true;
+    }
+    if (!s.websiteZipUrl) {
+      await ctx.reply(
+        "Pehle website panel ki .zip file ya https:// link bhejein."
       );
+      return true;
     }
-
-    s.websiteZipUrl = fileLink.href;
-    await ctx.reply(
-      "Website ZIP link STUDY BOT session mein save ho gaya. Ab /build ya /mergebuild likhein."
-    );
-  } catch (err) {
-    await ctx.reply(`ZIP link error: ${err.message}`);
+    const tagName = `merged-${ctx.from?.id || "user"}-${Date.now()}`;
+    await ctx.reply("Source + STUDY BOT merge aur APK build start ho raha hai...");
+    try {
+      await dispatchWorkflow(MERGE_WORKFLOW_FILE, {
+        source_zip_url: s.sourceZipUrl,
+        panel_zip_url: s.websiteZipUrl,
+        tag_name: tagName,
+      });
+      await ctx.reply(
+        [
+          "Merge & Build workflow start ho gaya!",
+          `Tag: ${tagName}`,
+          "GitHub Releases mein merged-panel-app.apk banne ke baad download kar lein.",
+        ].join("\n")
+      );
+    } catch (err) {
+      await ctx.reply(`Merge build error: ${err.message}`);
+    }
+    return true;
   }
-});
 
-bot.on("text", async (ctx) => {
-  const text = (ctx.message?.text || "").trim();
-  if (!text || text.startsWith("/")) return;
+  if (text.startsWith("/build")) {
+    if (!s.apkUrl) {
+      await ctx.reply("Pehle base .apk ka direct https:// link bhejein.");
+      return true;
+    }
+    if (!s.websiteUrl && !s.websiteZipUrl) {
+      await ctx.reply("Pehle Website URL ya Website ZIP link/file bhejein.");
+      return true;
+    }
+    const tagName = `build-${ctx.from?.id || "user"}-${Date.now()}`;
+    await ctx.reply("GitHub Actions workflow trigger ho raha hai...");
+    try {
+      await dispatchWorkflow(WORKFLOW_FILE, {
+        apk_url: s.apkUrl,
+        website_url: s.websiteUrl || "",
+        website_zip_url: s.websiteZipUrl || "",
+        tag_name: tagName,
+      });
+      await ctx.reply(
+        [
+          "Build workflow start ho gaya hai!",
+          `Tag: ${tagName}`,
+          "GitHub repository ke Actions / Releases tab mein progress aur final APK dekhein.",
+        ].join("\n")
+      );
+    } catch (err) {
+      await ctx.reply(`Build trigger fail hua:\n${err.message}`);
+    }
+    return true;
+  }
+
+  return false;
+}
+
+bot.use(async (ctx, next) => {
+  if (ctx.callbackQuery?.data) {
+    const handled = await handleCallbackData(ctx, ctx.callbackQuery.data);
+    if (handled) return;
+  }
+
+  const msg = ctx.message;
+  if (!msg) return next();
 
   const s = getSession(ctx.from?.id);
 
-  if (s.awaitingYoutubeFor && isAdmin(ctx.from?.id)) {
-    if (!isHttpUrl(text)) {
-      return ctx.reply("Kripya valid YouTube https:// link bhejein.");
+  if (Array.isArray(msg.photo) && msg.photo.length > 0 && isAdmin(ctx.from?.id)) {
+    try {
+      const largest = msg.photo[msg.photo.length - 1];
+      const fileLink = await ctx.telegram.getFileLink(largest.file_id);
+      const uData = getUnitData(s.activeSubj ?? 0, s.activeUnit ?? 0);
+      uData.noteFiles.push({
+        name: `photo_${Date.now()}.jpg`,
+        url: fileLink.href,
+        mime: "image/jpeg",
+      });
+      await ctx.reply(
+        `🔵 Photo notes mein add ho gayi! (${DEFAULT_UNITS[s.activeUnit ?? 0]} • Total files: ${uData.noteFiles.length})\nAur PDF/Photo bhejein ya /mergenotes se ek PDF banayein.`
+      );
+    } catch (err) {
+      await ctx.reply(`Photo error: ${err.message}`);
     }
-    const target = s.awaitingYoutubeFor;
+    return;
+  }
+
+  if (msg.video && isAdmin(ctx.from?.id)) {
+    const target = s.awaitingLectureVideoFor;
+    if (!target) {
+      await ctx.reply(
+        "Kisi lecture par tap karke 'Upload / Update Video' chunein, phir video bhejein."
+      );
+      return;
+    }
     const uData = getUnitData(target.subjIdx, target.unitIdx);
     const lec = uData.lectures[target.lecIdx];
-    if (lec) {
-      lec.youtubeUrl = text;
-      s.awaitingYoutubeFor = null;
-      return ctx.reply(
-        `🟢 Lecture "${lec.title}" ka YouTube link update ho gaya:\n${text}`,
-        lectureDetailKeyboard(target.subjIdx, target.unitIdx, target.lecIdx)
-      );
+    if (!lec) {
+      await ctx.reply("Lecture nahi mila.");
+      return;
     }
-  }
-
-  if (!isHttpUrl(text)) {
-    return ctx.reply("Kripya valid https:// URL bhejein ya command likhein.");
-  }
-
-  const lower = text.toLowerCase();
-  const sizeBytes = await checkRemoteFileSize(text);
-  if (sizeBytes !== null && sizeBytes > MAX_FILE_BYTES) {
-    return ctx.reply(
-      `File size ${formatMB(sizeBytes)} hai, jo 1024 MB (1 GB) limit se zyada hai.`
+    lec.videoFileId = msg.video.file_id;
+    s.awaitingLectureVideoFor = null;
+    await ctx.reply(
+      `🟢 Lecture "${lec.title}" ka video update ho gaya!`,
+      lectureDetailKeyboard(target.subjIdx, target.unitIdx, target.lecIdx)
     );
+    return;
   }
 
-  if (lower.includes(".apk")) {
-    s.apkUrl = text;
-    const sizeText = sizeBytes ? ` (${formatMB(sizeBytes)})` : "";
-    return ctx.reply(
-      `Base APK URL save ho gaya${sizeText}.\nAb /source se source code nikal sakte hain, ya Website URL/ZIP bhej kar /build likh sakte hain.`
-    );
-  }
+  if (msg.document) {
+    const doc = msg.document;
+    const fileName = (doc.file_name || "").toLowerCase();
 
-  if (lower.includes(".zip")) {
-    const sizeText = sizeBytes ? ` (${formatMB(sizeBytes)})` : "";
-    if (lower.includes("source") || lower.includes("apk-source")) {
-      s.sourceZipUrl = text;
-      return ctx.reply(
-        `Source ZIP URL save ho gaya${sizeText}.\nAb website panel ZIP link bhej kar /mergebuild likhein.`
-      );
+    if (s.awaitingLectureVideoFor && isAdmin(ctx.from?.id)) {
+      const target = s.awaitingLectureVideoFor;
+      const uData = getUnitData(target.subjIdx, target.unitIdx);
+      const lec = uData.lectures[target.lecIdx];
+      if (lec) {
+        lec.videoFileId = doc.file_id;
+        s.awaitingLectureVideoFor = null;
+        await ctx.reply(
+          `🟢 Lecture "${lec.title}" ka video file update ho gaya!`,
+          lectureDetailKeyboard(target.subjIdx, target.unitIdx, target.lecIdx)
+        );
+        return;
+      }
     }
-    s.websiteZipUrl = text;
-    return ctx.reply(
-      `Website ZIP URL save ho gaya${sizeText}.\nAb /build ya /mergebuild likhein.`
-    );
+
+    if (fileName.endsWith(".pdf") && isAdmin(ctx.from?.id)) {
+      try {
+        const fileLink = await ctx.telegram.getFileLink(doc.file_id);
+        const uData = getUnitData(s.activeSubj ?? 0, s.activeUnit ?? 0);
+        uData.noteFiles.push({
+          name: doc.file_name || `notes_${Date.now()}.pdf`,
+          url: fileLink.href,
+          mime: "application/pdf",
+        });
+        await ctx.reply(
+          `🔵 PDF "${doc.file_name}" notes mein add ho gayi! (${DEFAULT_UNITS[s.activeUnit ?? 0]} • Total files: ${uData.noteFiles.length})\nAur PDF/Photo bhejein ya /mergenotes se ek single PDF banayein.`
+        );
+      } catch (err) {
+        await ctx.reply(`PDF upload error: ${err.message}`);
+      }
+      return;
+    }
+
+    if ((doc.file_size || 0) > 20 * 1024 * 1024) {
+      await ctx.reply(
+        "Telegram bot 20 MB se badi file direct download nahi kar sakta. Kripya 1 GB tak ki file ka direct https:// download link bhejein."
+      );
+      return;
+    }
+
+    if (!fileName.endsWith(".zip")) {
+      await ctx.reply(
+        "Badi .apk file ka direct https:// link bhejein, ya chhoti .zip file bhejein."
+      );
+      return;
+    }
+
+    try {
+      const fileLink = await ctx.telegram.getFileLink(doc.file_id);
+      if (fileName.includes("source")) {
+        s.sourceZipUrl = fileLink.href;
+        await ctx.reply(
+          "Source ZIP link STUDY BOT session mein save ho gaya. Ab website panel ZIP/link bhej kar /mergebuild likhein."
+        );
+        return;
+      }
+      s.websiteZipUrl = fileLink.href;
+      await ctx.reply(
+        "Website ZIP link STUDY BOT session mein save ho gaya. Ab /build ya /mergebuild likhein."
+      );
+    } catch (err) {
+      await ctx.reply(`ZIP link error: ${err.message}`);
+    }
+    return;
   }
 
-  s.websiteUrl = text;
-  return ctx.reply(
-    `Website URL save ho gaya:\n${text}\n\nAb /build likhein (agar APK URL bhi save kar chuke hain).`
-  );
-});
+  if (typeof msg.text === "string") {
+    const text = msg.text.trim();
+    if (!text) return;
 
-bot.command("source", async (ctx) => {
-  const s = getSession(ctx.from?.id);
-  if (!s.apkUrl) {
-    return ctx.reply(
-      "Pehle .apk file ka direct https:// link bhejein, phir /source likhein."
-    );
-  }
+    if (text.startsWith("/")) {
+      const cmdHandled = await handleAdminTextCommand(ctx, text);
+      if (cmdHandled) return;
+      const buildHandled = await handleBuildCommand(ctx, text);
+      if (buildHandled) return;
+      return;
+    }
 
-  const tagName = `source-${ctx.from?.id || "user"}-${Date.now()}`;
-  await ctx.reply(
-    "STUDY BOT APK source code extraction trigger kiya ja raha hai..."
-  );
+    if (s.awaitingYoutubeFor && isAdmin(ctx.from?.id)) {
+      if (!isHttpUrl(text)) {
+        await ctx.reply("Kripya valid YouTube https:// link bhejein.");
+        return;
+      }
+      const target = s.awaitingYoutubeFor;
+      const uData = getUnitData(target.subjIdx, target.unitIdx);
+      const lec = uData.lectures[target.lecIdx];
+      if (lec) {
+        lec.youtubeUrl = text;
+        s.awaitingYoutubeFor = null;
+        await ctx.reply(
+          `🟢 Lecture "${lec.title}" ka YouTube link update ho gaya:\n${text}`,
+          lectureDetailKeyboard(target.subjIdx, target.unitIdx, target.lecIdx)
+        );
+        return;
+      }
+    }
 
-  try {
-    await dispatchWorkflow(SOURCE_WORKFLOW_FILE, {
-      apk_url: s.apkUrl,
-      tag_name: tagName,
-    });
+    if (!isHttpUrl(text)) {
+      await ctx.reply("Kripya valid https:// URL bhejein ya command likhein.");
+      return;
+    }
 
+    const lower = text.toLowerCase();
+    const sizeBytes = await checkRemoteFileSize(text);
+    if (sizeBytes !== null && sizeBytes > MAX_FILE_BYTES) {
+      await ctx.reply(
+        `File size ${formatMB(sizeBytes)} hai, jo 1024 MB (1 GB) limit se zyada hai.`
+      );
+      return;
+    }
+
+    if (lower.includes(".apk")) {
+      s.apkUrl = text;
+      const sizeText = sizeBytes ? ` (${formatMB(sizeBytes)})` : "";
+      await ctx.reply(
+        `Base APK URL save ho gaya${sizeText}.\nAb /source se source code nikal sakte hain, ya Website URL/ZIP bhej kar /build likh sakte hain.`
+      );
+      return;
+    }
+
+    if (lower.includes(".zip")) {
+      const sizeText = sizeBytes ? ` (${formatMB(sizeBytes)})` : "";
+      if (lower.includes("source") || lower.includes("apk-source")) {
+        s.sourceZipUrl = text;
+        await ctx.reply(
+          `Source ZIP URL save ho gaya${sizeText}.\nAb website panel ZIP link bhej kar /mergebuild likhein.`
+        );
+        return;
+      }
+      s.websiteZipUrl = text;
+      await ctx.reply(
+        `Website ZIP URL save ho gaya${sizeText}.\nAb /build ya /mergebuild likhein.`
+      );
+      return;
+    }
+
+    s.websiteUrl = text;
     await ctx.reply(
-      [
-        "Source extraction workflow trigger ho gaya!",
-        `Tag: ${tagName}`,
-        "GitHub Releases mein apk-source-code.zip banne ke baad uska link bhej kar /mergebuild use karein.",
-      ].join("\n")
+      `Website URL save ho gaya:\n${text}\n\nAb /build likhein (agar APK URL bhi save kar chuke hain).`
     );
-  } catch (err) {
-    console.error("SOURCE_COMMAND_ERROR:", err);
-    await ctx.reply(`Source error: ${err.message}`);
   }
 });
-
-bot.command("mergebuild", async (ctx) => {
-  const s = getSession(ctx.from?.id);
-  if (!s.sourceZipUrl) {
-    return ctx.reply("Pehle extracted source code ZIP ka https:// link bhejein.");
-  }
-  if (!s.websiteZipUrl) {
-    return ctx.reply("Pehle website panel ki .zip file ya https:// link bhejein.");
-  }
-
-  const tagName = `merged-${ctx.from?.id || "user"}-${Date.now()}`;
-  await ctx.reply("Source + STUDY BOT merge aur APK build start ho raha hai...");
-
-  try {
-    await dispatchWorkflow(MERGE_WORKFLOW_FILE, {
-      source_zip_url: s.sourceZipUrl,
-      panel_zip_url: s.websiteZipUrl,
-      tag_name: tagName,
-    });
-
-    await ctx.reply(
-      [
-        "Merge & Build workflow start ho gaya!",
-        `Tag: ${tagName}`,
-        "GitHub Releases mein merged-panel-app.apk banne ke baad download kar lein.",
-      ].join("\n")
-    );
-  } catch (err) {
-    console.error("MERGEBUILD_COMMAND_ERROR:", err);
-    await ctx.reply(`Merge build error: ${err.message}`);
-  }
-});
-
-bot.command("build", async (ctx) => {
-  const s = getSession(ctx.from?.id);
-
-  if (!s.apkUrl) {
-    return ctx.reply("Pehle base .apk ka direct https:// link bhejein.");
-  }
-  if (!s.websiteUrl && !s.websiteZipUrl) {
-    return ctx.reply("Pehle Website URL ya Website ZIP link/file bhejein.");
-  }
-
-  const tagName = `build-${ctx.from?.id || "user"}-${Date.now()}`;
-  await ctx.reply("GitHub Actions workflow trigger ho raha hai...");
-
-  try {
-    await dispatchWorkflow(WORKFLOW_FILE, {
-      apk_url: s.apkUrl,
-      website_url: s.websiteUrl || "",
-      website_zip_url: s.websiteZipUrl || "",
-      tag_name: tagName,
-    });
-
-    await ctx.reply(
-      [
-        "Build workflow start ho gaya hai!",
-        `Tag: ${tagName}`,
-        "GitHub repository ke Actions / Releases tab mein progress aur final APK dekhein.",
-      ].join("\n")
-    );
-  } catch (err) {
-    console.error("BUILD_COMMAND_ERROR:", err);
-    await ctx.reply(`Build trigger fail hua:\n${err.message}`);
-  }
-});
-
 bot
   .launch({ dropPendingUpdates: true })
   .then(() => {
