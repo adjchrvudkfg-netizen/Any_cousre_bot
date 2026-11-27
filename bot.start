@@ -1,0 +1,31 @@
+bot.catch(async (err, ctx) => {
+  const firstLine = String(err?.stack || err?.message || err).split("\n")[0];
+  console.error("TELEGRAF_UNHANDLED_ERROR:", err?.stack || err);
+  try {
+    if (ctx && typeof ctx.reply === "function") {
+      await ctx.reply(`STUDY BOT error: ${firstLine}`);
+    }
+  } catch (_) {}
+});
+
+bot.start(async (ctx) => {
+  const userId = ctx.from?.id;
+  if (userId) {
+    sessions.set(userId, createFreshSession());
+  }
+
+  const text = buildStartMessage(ctx);
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback("🔵 Notes", "menu_notes")],
+    [
+      Markup.button.callback("🟢 Syllabus", "menu_syllabus"),
+      Markup.button.callback("🟢 PYQ", "menu_pyq"),
+    ],
+    [
+      Markup.button.callback("🟢 Mock Test", "menu_mock"),
+      Markup.button.callback("🟢 Lecture", "menu_lecture"),
+    ],
+  ]);
+
+  await ctx.reply(text, keyboard);
+});
