@@ -1,31 +1,49 @@
 bot.catch(async (err, ctx) => {
-  const firstLine = String(err?.stack || err?.message || err).split("\n")[0];
-  console.error("TELEGRAF_UNHANDLED_ERROR:", err?.stack || err);
+  console.error("TELEGRAF_UNHANDLED_ERROR:", err);
   try {
     if (ctx && typeof ctx.reply === "function") {
-      await ctx.reply(`STUDY BOT error: ${firstLine}`);
+      await ctx.reply(`STUDY BOT error: ${err?.message || String(err)}`);
     }
   } catch (_) {}
 });
 
 bot.start(async (ctx) => {
-  const userId = ctx.from?.id;
-  if (userId) {
-    sessions.set(userId, createFreshSession());
-  }
+  const firstName = String(ctx.from?.first_name || ctx.from?.username || "Student");
+  const userId = String(ctx.from?.id || "N/A");
 
-  const text = buildStartMessage(ctx);
-  const keyboard = Markup.inlineKeyboard([
-    [Markup.button.callback("🔵 Notes", "menu_notes")],
-    [
-      Markup.button.callback("🟢 Syllabus", "menu_syllabus"),
-      Markup.button.callback("🟢 PYQ", "menu_pyq"),
-    ],
-    [
-      Markup.button.callback("🟢 Mock Test", "menu_mock"),
-      Markup.button.callback("🟢 Lecture", "menu_lecture"),
-    ],
-  ]);
+  const text = [
+    "🌸 - STUDY BOT - 🌸",
+    "",
+    `👤 Hello, ${firstName}!`,
+    "",
+    "📚 Complete study material, instant access.",
+    "",
+    "— 🔵 Notes (Unit PDF/Photo Merge)",
+    "— 🟢 Syllabus (Subject & Unit-wise)",
+    "— 🟢 PYQ (Past Exam Questions Only)",
+    "— 🟢 Mock Test (Short 1Hr • Full 3Hr • -1/3)",
+    "— 🟢 Lecture (Subject -> Unit -> Lectures)",
+    "━━━━━━━━━━━━━━━━━━━━",
+    `👤 User ID: ${userId}`,
+    "📌 Study Bot: Active",
+    "",
+    "Tap any button below to begin.",
+  ].join("\n");
 
-  await ctx.reply(text, keyboard);
+  await ctx.reply(text, {
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: "🔵 Notes", callback_data: "menu_notes" }],
+        [
+          { text: "🟢 Syllabus", callback_data: "menu_syllabus" },
+          { text: "🟢 PYQ", callback_data: "menu_pyq" },
+        ],
+        [
+          { text: "🟢 Mock Test", callback_data: "menu_mock" },
+          { text: "🟢 Lecture", callback_data: "menu_lecture" },
+        ],
+      ],
+    },
+  });
 });
+
