@@ -10,7 +10,7 @@ const ADMIN_IDS = (process.env.ADMIN_IDS || "")
   .map((id) => Number(id.trim()))
   .filter((n) => Number.isFinite(n) && n > 0);
 
-const PORT = process.env.PORT || 3000;
+const PORT = Number(process.env.PORT) || 3000;
 const MAX_FILE_BYTES = 1024 * 1024 * 1024; // 1 GB
 
 const GITHUB_OWNER = (process.env.GITHUB_OWNER || "").trim();
@@ -179,6 +179,7 @@ function createFreshSession() {
 }
 
 function getSession(userId) {
+  if (!userId) return createFreshSession();
   if (!sessions.has(userId)) {
     sessions.set(userId, createFreshSession());
   }
@@ -194,10 +195,9 @@ function getSession(userId) {
 
 async function replacePage(ctx, text, extra = {}) {
   try {
-    if (ctx.callbackQuery?.message?.message_id) {
-      await ctx
-        .deleteMessage(ctx.callbackQuery.message.message_id)
-        .catch(() => {});
+    const msgId = ctx.callbackQuery?.message?.message_id;
+    if (msgId) {
+      await ctx.deleteMessage(msgId).catch(() => {});
     }
   } catch (_) {}
   return ctx.reply(text, extra);
@@ -278,7 +278,10 @@ function subjectButtonsKeyboard(prefix, isNotes = false) {
 function unitButtonsKeyboard(prefix, subjIdx, isNotes = false) {
   const icon = isNotes ? "🔵" : "🟢";
   const rows = DEFAULT_UNITS.map((unitLabel, uIdx) => [
-    Markup.button.callback(`${icon} ${unitLabel}`, `${prefix}_${subjIdx}_${uIdx}`),
+    Markup.button.callback(
+      `${icon} ${unitLabel}`,
+      `${prefix}_${subjIdx}_${uIdx}`
+    ),
   ]);
   if (prefix === "notes_unit") {
     rows.push([
@@ -364,8 +367,10 @@ function mockOptionKeyboard(qIndex) {
 }
 
 function buildStartMessage(ctx) {
-  const userName = ctx.from?.first_name || ctx.from?.username || "Student";
-  const userId = ctx.from?.id || "N/A";
+  const userName = String(
+    ctx.from?.first_name || ctx.from?.username || "Student"
+  );
+  const userId = String(ctx.from?.id || "N/A");
 
   return [
     "🌸 - STUDY BOT - 🌸",
@@ -391,8 +396,8 @@ const bot = new Telegraf(BOT_TOKEN);
 bot.catch(async (err, ctx) => {
   console.error("TELEGRAF_UNHANDLED_ERROR:", err);
   try {
-    if (ctx && ctx.reply) {
-      await ctx.reply(`STUDY BOT error: ${err.message || "Unknown error"}`);
+    if (ctx && typeof ctx.reply === "function") {
+      await ctx.reply(`STUDY BOT error: ${err?.message || "Unknown error"}`);
     }
   } catch (_) {}
 });
@@ -416,10 +421,9 @@ function parseSubjAndUnit(rawSubj, rawUnit) {
 }
 
 bot.start(async (ctx) => {
-  sessions.set(ctx.from.id, createFreshSession());
-  await ctx
-    .reply("Loading STUDY BOT...", Markup.removeKeyboard())
-    .catch(() => {});
+  if (ctx.from?.id) {
+    sessions.set(ctx.from.id, createFreshSession());
+  }
   await ctx.reply(buildStartMessage(ctx), inlineMenuKeyboard());
 });
 
@@ -429,15 +433,14 @@ bot.action("back_main", async (ctx) => {
 });
 
 bot.command("addnotes", async (ctx) => {
-  if (!isAdmin(ctx.from.id)) {
+  if (!isAdmin(ctx.from?.id)) {
     return ctx.reply("Sirf admin hi notes add kar sakta hai.");
   }
-  const payload = ctx.message.text.replace(/^\/addnotes\s*/i, "");
+  const payload = (ctx.message?.text || "").replace(/^\/addnotes\s*/i, "");
   const parts = payload.split("|").map((p) => p.trim());
   if (parts.length < 3) {
     return ctx.reply(
-      "Format: `/addnotes <subj_1_to_6> | <unit_1_to_5> | <notes text>`",
-      { parse_mode: "Markdown" }
+      "Format: /addnotes <subj_1_to_6> | <unit_1_to_5> | <notes text>"
     );
   }
   try {
@@ -448,12 +451,12 @@ bot.command("addnotes", async (ctx) => {
       ? `${uData.notesText}\n\n${noteBody}`
       : noteBody;
 
-    const s = getSession(ctx.from.id);
+    const s = getSession(ctx.from?.id);
     s.activeSubj = sIdx;
     s.activeUnit = uIdx;
 
     await ctx.reply(
-      `🔵 Notes add ho gaye!\nSubject: *${SUBJECTS[sIdx]}*\nUnit: *${DEFAULT_UNITS[uIdx]}*\n\nAb is unit ke liye PDFs/Photos bhej kar /mergenotes ${sIdx + 1} | ${uIdx + 1} chala sakte hain.`
+      `🔵 Notes add ho gaye!\nSubject: ${SUBJECTS[sIdx]}\nUnit: ${DEFAULT_UNITS[uIdx]}\n\nAb is unit ke liye PDFs/Photos bhej kar /mergenotes ${sIdx + 1} | ${uIdx + 1} chala sakte hain.`
     );
   } catch (err) {
     await ctx.reply(`Add notes error: ${err.message}`);
@@ -461,15 +464,14 @@ bot.command("addnotes", async (ctx) => {
 });
 
 bot.command("addsyllabus", async (ctx) => {
-  if (!isAdmin(ctx.from.id)) {
+  if (!isAdmin(ctx.from?.id)) {
     return ctx.reply("Sirf admin hi syllabus add kar sakta hai.");
   }
-  const payload = ctx.message.text.replace(/^\/addsyllabus\s*/i, "");
+  const payload = (ctx.message?.text || "").replace(/^\/addsyllabus\s*/i, "");
   const parts = payload.split("|").map((p) => p.trim());
   if (parts.length < 3) {
     return ctx.reply(
-      "Format: `/addsyllabus <subj_1_to_6> | <unit_1_to_5> | <syllabus text>`",
-      { parse_mode: "Markdown" }
+      "Format: /addsyllabus <subj_1_to_6> | <unit_1_to_5> | <syllabus text>"
     );
   }
   try {
@@ -479,7 +481,7 @@ bot.command("addsyllabus", async (ctx) => {
     uData.syllabusText = sylBody;
 
     await ctx.reply(
-      `🟢 Syllabus update ho gaya!\nSubject: *${SUBJECTS[sIdx]}*\nUnit: *${DEFAULT_UNITS[uIdx]}*`
+      `🟢 Syllabus update ho gaya!\nSubject: ${SUBJECTS[sIdx]}\nUnit: ${DEFAULT_UNITS[uIdx]}`
     );
   } catch (err) {
     await ctx.reply(`Add syllabus error: ${err.message}`);
@@ -487,15 +489,14 @@ bot.command("addsyllabus", async (ctx) => {
 });
 
 bot.command("addlecture", async (ctx) => {
-  if (!isAdmin(ctx.from.id)) {
+  if (!isAdmin(ctx.from?.id)) {
     return ctx.reply("Sirf admin hi lecture add kar sakta hai.");
   }
-  const payload = ctx.message.text.replace(/^\/addlecture\s*/i, "");
+  const payload = (ctx.message?.text || "").replace(/^\/addlecture\s*/i, "");
   const parts = payload.split("|").map((p) => p.trim());
   if (parts.length < 3) {
     return ctx.reply(
-      "Format: `/addlecture <subj_1_to_6> | <unit_1_to_5> | <lecture title> | <optional youtube_url>`",
-      { parse_mode: "Markdown" }
+      "Format: /addlecture <subj_1_to_6> | <unit_1_to_5> | <lecture title> | <optional youtube_url>"
     );
   }
   try {
@@ -514,9 +515,9 @@ bot.command("addlecture", async (ctx) => {
     await ctx.reply(
       [
         `🟢 Lecture #${lecIdx + 1} add ho gaya!`,
-        `Subject: *${SUBJECTS[sIdx]}*`,
-        `Unit: *${DEFAULT_UNITS[uIdx]}*`,
-        `Title: *${title}*`,
+        `Subject: ${SUBJECTS[sIdx]}`,
+        `Unit: ${DEFAULT_UNITS[uIdx]}`,
+        `Title: ${title}`,
         `YouTube: ${ytUrl || "Not set (abhi link bhej sakte hain)"}`,
         "",
         "Is lecture ka YouTube link ya video file bhejne ke liye neeche buttons use karein:",
@@ -532,12 +533,12 @@ async function mergeAndSendUnitNotes(ctx, sIdx, uIdx) {
   const uData = getUnitData(sIdx, uIdx);
   if (!uData.noteFiles.length) {
     return ctx.reply(
-      `🔵 *${SUBJECTS[sIdx]} (${DEFAULT_UNITS[uIdx]})* mein merge karne ke liye koi PDF ya Photo upload nahi hui hai.`
+      `🔵 ${SUBJECTS[sIdx]} (${DEFAULT_UNITS[uIdx]}) mein merge karne ke liye koi PDF ya Photo upload nahi hui hai.`
     );
   }
 
   await ctx.reply(
-    `🔵 *${SUBJECTS[sIdx]} — ${DEFAULT_UNITS[uIdx]}* ki ${uData.noteFiles.length} files ek PDF mein merge ho rahi hain...`
+    `🔵 ${SUBJECTS[sIdx]} — ${DEFAULT_UNITS[uIdx]} ki ${uData.noteFiles.length} files ek PDF mein merge ho rahi hain...`
   );
 
   const mergedBuf = await mergeFilesToSinglePdf(uData.noteFiles);
@@ -548,18 +549,18 @@ async function mergeAndSendUnitNotes(ctx, sIdx, uIdx) {
   await ctx.replyWithDocument(
     { source: mergedBuf, filename: fileName },
     {
-      caption: `🔵 *${SUBJECTS[sIdx]} (${DEFAULT_UNITS[uIdx]})* — Combined Notes PDF (${uData.noteFiles.length} files merged)`,
+      caption: `🔵 ${SUBJECTS[sIdx]} (${DEFAULT_UNITS[uIdx]}) — Combined Notes PDF (${uData.noteFiles.length} files merged)`,
       ...inlineMenuKeyboard(),
     }
   );
 }
 
 bot.command("mergenotes", async (ctx) => {
-  if (!isAdmin(ctx.from.id)) {
+  if (!isAdmin(ctx.from?.id)) {
     return ctx.reply("Sirf admin hi notes merge kar sakta hai.");
   }
-  const s = getSession(ctx.from.id);
-  const payload = ctx.message.text.replace(/^\/mergenotes\s*/i, "").trim();
+  const s = getSession(ctx.from?.id);
+  const payload = (ctx.message?.text || "").replace(/^\/mergenotes\s*/i, "").trim();
 
   let sIdx = s.activeSubj ?? 0;
   let uIdx = s.activeUnit ?? 0;
@@ -583,7 +584,7 @@ bot.action("menu_notes", async (ctx) => {
   await ctx.answerCbQuery();
   await replacePage(
     ctx,
-    "🔵 *Notes — Subject Chunein:*",
+    "🔵 Notes — Subject Chunein:",
     subjectButtonsKeyboard("notes_subj", true)
   );
 });
@@ -592,7 +593,7 @@ bot.action("menu_syllabus", async (ctx) => {
   await ctx.answerCbQuery();
   await replacePage(
     ctx,
-    "🟢 *Syllabus — Subject Chunein:*",
+    "🟢 Syllabus — Subject Chunein:",
     subjectButtonsKeyboard("syl_subj", false)
   );
 });
@@ -601,7 +602,7 @@ bot.action("menu_lecture", async (ctx) => {
   await ctx.answerCbQuery();
   await replacePage(
     ctx,
-    "🟢 *Lecture — Subject Chunein:*",
+    "🟢 Lecture — Subject Chunein:",
     subjectButtonsKeyboard("lec_subj", false)
   );
 });
@@ -610,7 +611,7 @@ bot.action("menu_pyq", async (ctx) => {
   await ctx.answerCbQuery();
   await replacePage(
     ctx,
-    "🟢 *PYQ (Pehle Exam Mein Aaye Hue Questions) — Subject Chunein:*",
+    "🟢 PYQ (Pehle Exam Mein Aaye Hue Questions) — Subject Chunein:",
     subjectButtonsKeyboard("pyq_subj", false)
   );
 });
@@ -620,18 +621,18 @@ for (let i = 0; i < SUBJECTS.length; i++) {
 
   bot.action(`notes_subj_${i}`, async (ctx) => {
     await ctx.answerCbQuery();
-    const s = getSession(ctx.from.id);
+    const s = getSession(ctx.from?.id);
     s.activeSubj = i;
     await replacePage(
       ctx,
-      `🔵 *Notes: ${subjectName}*\nUnit chunein (ya is subject ki unit files merge karein):`,
+      `🔵 Notes: ${subjectName}\nUnit chunein (ya is subject ki unit files merge karein):`,
       unitButtonsKeyboard("notes_unit", i, true)
     );
   });
 
   bot.action(`merge_notes_btn_${i}`, async (ctx) => {
     await ctx.answerCbQuery();
-    const s = getSession(ctx.from.id);
+    const s = getSession(ctx.from?.id);
     try {
       await mergeAndSendUnitNotes(ctx, i, s.activeUnit ?? 0);
     } catch (err) {
@@ -643,7 +644,7 @@ for (let i = 0; i < SUBJECTS.length; i++) {
     await ctx.answerCbQuery();
     await replacePage(
       ctx,
-      `🟢 *Syllabus: ${subjectName}*\nUnit chunein:`,
+      `🟢 Syllabus: ${subjectName}\nUnit chunein:`,
       unitButtonsKeyboard("syl_unit", i, false)
     );
   });
@@ -652,7 +653,7 @@ for (let i = 0; i < SUBJECTS.length; i++) {
     await ctx.answerCbQuery();
     await replacePage(
       ctx,
-      `🟢 *Lecture: ${subjectName}*\nUnit chunein:`,
+      `🟢 Lecture: ${subjectName}\nUnit chunein:`,
       unitButtonsKeyboard("lec_unit", i, false)
     );
   });
@@ -662,7 +663,7 @@ for (let i = 0; i < SUBJECTS.length; i++) {
     try {
       await replacePage(
         ctx,
-        `🟢 *${subjectName}* ke pehle exam mein aaye hue PYQs nikaale ja rahe hain...`
+        `🟢 ${subjectName} ke pehle exam mein aaye hue PYQs nikaale ja rahe hain...`
       );
       const aiText = await askGemini(
         [
@@ -672,7 +673,7 @@ for (let i = 0; i < SUBJECTS.length; i++) {
       );
       await replacePage(
         ctx,
-        `🟢 *Past Exam PYQs: ${subjectName}*\n\n${aiText}`,
+        `🟢 Past Exam PYQs: ${subjectName}\n\n${aiText}`,
         subjectButtonsKeyboard("pyq_subj", false)
       );
     } catch (err) {
@@ -689,7 +690,7 @@ for (let i = 0; i < SUBJECTS.length; i++) {
 
     bot.action(`notes_unit_${i}_${u}`, async (ctx) => {
       await ctx.answerCbQuery();
-      const s = getSession(ctx.from.id);
+      const s = getSession(ctx.from?.id);
       s.activeSubj = i;
       s.activeUnit = u;
 
@@ -706,7 +707,7 @@ for (let i = 0; i < SUBJECTS.length; i++) {
       if (uData.notesText) {
         return replacePage(
           ctx,
-          `🔵 *Notes: ${subjectName} (${unitLabel})*\n\n${uData.notesText}`,
+          `🔵 Notes: ${subjectName} (${unitLabel})\n\n${uData.notesText}`,
           unitButtonsKeyboard("notes_unit", i, true)
         );
       }
@@ -714,14 +715,14 @@ for (let i = 0; i < SUBJECTS.length; i++) {
       try {
         await replacePage(
           ctx,
-          `🔵 *${subjectName} (${unitLabel})* ke notes taiyar kiye ja rahe hain...`
+          `🔵 ${subjectName} (${unitLabel}) ke notes taiyar kiye ja rahe hain...`
         );
         const aiText = await askGemini(
           `Create concise, well-structured revision notes for "${unitLabel}" of "${subjectName}".`
         );
         await replacePage(
           ctx,
-          `🔵 *Notes: ${subjectName} (${unitLabel})*\n\n${aiText}`,
+          `🔵 Notes: ${subjectName} (${unitLabel})\n\n${aiText}`,
           unitButtonsKeyboard("notes_unit", i, true)
         );
       } catch (err) {
@@ -739,7 +740,7 @@ for (let i = 0; i < SUBJECTS.length; i++) {
       if (uData.syllabusText) {
         return replacePage(
           ctx,
-          `🟢 *Syllabus: ${subjectName} (${unitLabel})*\n\n${uData.syllabusText}`,
+          `🟢 Syllabus: ${subjectName} (${unitLabel})\n\n${uData.syllabusText}`,
           unitButtonsKeyboard("syl_unit", i, false)
         );
       }
@@ -747,14 +748,14 @@ for (let i = 0; i < SUBJECTS.length; i++) {
       try {
         await replacePage(
           ctx,
-          `🟢 *${subjectName} (${unitLabel})* ka syllabus load ho raha hai...`
+          `🟢 ${subjectName} (${unitLabel}) ka syllabus load ho raha hai...`
         );
         const aiText = await askGemini(
           `Provide the detailed syllabus topics for "${unitLabel}" of "${subjectName}".`
         );
         await replacePage(
           ctx,
-          `🟢 *Syllabus: ${subjectName} (${unitLabel})*\n\n${aiText}`,
+          `🟢 Syllabus: ${subjectName} (${unitLabel})\n\n${aiText}`,
           unitButtonsKeyboard("syl_unit", i, false)
         );
       } catch (err) {
@@ -773,8 +774,8 @@ for (let i = 0; i < SUBJECTS.length; i++) {
 
       const text =
         count > 0
-          ? `🟢 *Lectures: ${subjectName} (${unitLabel})*\nKul Lectures: *${count}*\n\nKisi lecture par tap karein:`
-          : `🟢 *Lectures: ${subjectName} (${unitLabel})*\nIs unit mein abhi koi lecture add nahi hua hai.\nAdmin \`/addlecture ${i + 1} | ${u + 1} | <Title> | <YouTube_URL>\` se add kar sakta hai.`;
+          ? `🟢 Lectures: ${subjectName} (${unitLabel})\nKul Lectures: ${count}\n\nKisi lecture par tap karein:`
+          : `🟢 Lectures: ${subjectName} (${unitLabel})\nIs unit mein abhi koi lecture add nahi hua hai.\nAdmin /addlecture ${i + 1} | ${u + 1} | <Title> | <YouTube_URL> se add kar sakta hai.`;
 
       await replacePage(ctx, text, lectureListKeyboard(i, u));
     });
@@ -788,7 +789,7 @@ for (let i = 0; i < SUBJECTS.length; i++) {
 
         if (lec.videoFileId) {
           await ctx.replyWithVideo(lec.videoFileId, {
-            caption: `🟢 *${lec.title}*\nSubject: ${subjectName} • ${unitLabel}${
+            caption: `🟢 ${lec.title}\nSubject: ${subjectName} • ${unitLabel}${
               lec.youtubeUrl ? `\nYouTube: ${lec.youtubeUrl}` : ""
             }`,
             ...lectureDetailKeyboard(i, u, l),
@@ -797,9 +798,9 @@ for (let i = 0; i < SUBJECTS.length; i++) {
         }
 
         const msg = [
-          `🟢 *${lec.title}*`,
-          `Subject: *${subjectName}*`,
-          `Unit: *${unitLabel}*`,
+          `🟢 ${lec.title}`,
+          `Subject: ${subjectName}`,
+          `Unit: ${unitLabel}`,
           `YouTube Link: ${lec.youtubeUrl || "Not provided"}`,
           `Uploaded Video: ${lec.videoFileId ? "Available" : "Not uploaded"}`,
         ].join("\n");
@@ -809,27 +810,27 @@ for (let i = 0; i < SUBJECTS.length; i++) {
 
       bot.action(`set_yt_${i}_${u}_${l}`, async (ctx) => {
         await ctx.answerCbQuery();
-        if (!isAdmin(ctx.from.id)) {
+        if (!isAdmin(ctx.from?.id)) {
           return ctx.reply("Sirf admin hi YouTube link set kar sakta hai.");
         }
-        const s = getSession(ctx.from.id);
+        const s = getSession(ctx.from?.id);
         s.awaitingYoutubeFor = { subjIdx: i, unitIdx: u, lecIdx: l };
         s.awaitingLectureVideoFor = null;
         await ctx.reply(
-          `🟢 *${getUnitData(i, u).lectures[l]?.title || "Lecture"}* ke liye YouTube link bhejein:`
+          `🟢 ${getUnitData(i, u).lectures[l]?.title || "Lecture"} ke liye YouTube link bhejein:`
         );
       });
 
       bot.action(`set_vid_${i}_${u}_${l}`, async (ctx) => {
         await ctx.answerCbQuery();
-        if (!isAdmin(ctx.from.id)) {
+        if (!isAdmin(ctx.from?.id)) {
           return ctx.reply("Sirf admin hi video upload kar sakta hai.");
         }
-        const s = getSession(ctx.from.id);
+        const s = getSession(ctx.from?.id);
         s.awaitingLectureVideoFor = { subjIdx: i, unitIdx: u, lecIdx: l };
         s.awaitingYoutubeFor = null;
         await ctx.reply(
-          `🟢 *${getUnitData(i, u).lectures[l]?.title || "Lecture"}* ke liye video file bhejein:`
+          `🟢 ${getUnitData(i, u).lectures[l]?.title || "Lecture"} ke liye video file bhejein:`
         );
       });
     }
@@ -916,10 +917,10 @@ async function generateFullExamPaper(subjectName, modeKey, ctx) {
     if (ctx && cfg.count > 20) {
       await replacePage(
         ctx,
-        `🟢 *${subjectName}* — *${cfg.label}*\nPractice questions ban rahe hain: *${Math.min(
+        `🟢 ${subjectName} — ${cfg.label}\nPractice questions ban rahe hain: ${Math.min(
           offset + currentBatch,
           cfg.count
-        )} / ${cfg.count}*...`
+        )} / ${cfg.count}...`
       );
     }
     const batch = await generateExamPaperBatch(
@@ -942,7 +943,7 @@ async function sendMockQuestion(ctx, s) {
 
   const elapsedMins = Math.max(0, Math.floor((Date.now() - m.startedAt) / 60000));
   if (elapsedMins >= m.durationMins) {
-    await ctx.reply("⏱️ *Time over!* Aapka paper auto-submit ho raha hai.");
+    await ctx.reply("⏱️ Time over! Aapka paper auto-submit ho raha hai.");
     return finishMockTest(ctx, s);
   }
 
@@ -951,10 +952,10 @@ async function sendMockQuestion(ctx, s) {
   const remainingMins = Math.max(0, m.durationMins - elapsedMins);
 
   const text = [
-    `🟢 *${m.subject}*`,
-    `📝 *${m.label}* | MM: ${m.totalMarks} | Neg: -1/3 | Left: ~${remainingMins}m`,
+    `🟢 ${m.subject}`,
+    `📝 ${m.label} | MM: ${m.totalMarks} | Neg: -1/3 | Left: ~${remainingMins}m`,
     `━━━━━━━━━━━━━━━━━━━━`,
-    `*Q${qNum} / ${m.questions.length}* [${qObj.unit} • +${m.marksPerQ} / -1/3]:`,
+    `Q${qNum} / ${m.questions.length} [${qObj.unit} • +${m.marksPerQ} / -1/3]:`,
     `${qObj.q}`,
     "",
     `A) ${qObj.A}`,
@@ -1005,21 +1006,21 @@ async function finishMockTest(ctx, s) {
   const secs = takenSecs % 60;
 
   const summary = [
-    "🟢 *EXAM PAPER RESULT SUMMARY*",
-    `📚 Subject: *${m.subject}*`,
-    `📋 Type: *${m.label}*`,
+    "🟢 EXAM PAPER RESULT SUMMARY",
+    `📚 Subject: ${m.subject}`,
+    `📋 Type: ${m.label}`,
     "━━━━━━━━━━━━━━━━━━━━",
-    `🏆 Net Score: *${netMarks} / ${m.totalMarks}*`,
-    `➕ Positive Marks: *+${positiveMarks.toFixed(2)}*`,
-    `➖ Negative Marks (-1/3): *-${negativeMarks.toFixed(2)}*`,
-    `⏱️ Time Taken: *${mins}m ${secs}s* (Limit: ${m.timeLabel})`,
-    `✅ Sahi (Correct): *${correctCount}*`,
-    `❌ Galat (Wrong): *${wrongCount}*`,
-    `⏭️ Chhode (Skipped): *${skippedCount}*`,
-    `📊 Total Questions: *${m.questions.length}*`,
+    `🏆 Net Score: ${netMarks} / ${m.totalMarks}`,
+    `➕ Positive Marks: +${positiveMarks.toFixed(2)}`,
+    `➖ Negative Marks (-1/3): -${negativeMarks.toFixed(2)}`,
+    `⏱️ Time Taken: ${mins}m ${secs}s (Limit: ${m.timeLabel})`,
+    `✅ Sahi (Correct): ${correctCount}`,
+    `❌ Galat (Wrong): ${wrongCount}`,
+    `⏭️ Chhode (Skipped): ${skippedCount}`,
+    `📊 Total Questions: ${m.questions.length}`,
     "━━━━━━━━━━━━━━━━━━━━",
     "",
-    "*Question-wise Answer Key & Review:*",
+    "Question-wise Answer Key & Review:",
     ...reviewLines,
   ].join("\n");
 
@@ -1039,7 +1040,7 @@ bot.action("menu_mock", async (ctx) => {
   await ctx.answerCbQuery();
   await replacePage(
     ctx,
-    "🟢 *Mock Test — Subject Chunein:*",
+    "🟢 Mock Test — Subject Chunein:",
     subjectButtonsKeyboard("mock_subj", false)
   );
 });
@@ -1049,16 +1050,16 @@ for (let i = 0; i < SUBJECTS.length; i++) {
 
   bot.action(`mock_subj_${i}`, async (ctx) => {
     await ctx.answerCbQuery();
-    const s = getSession(ctx.from.id);
+    const s = getSession(ctx.from?.id);
     s.pendingMockSubject = i;
     await replacePage(
       ctx,
       [
-        `🟢 *Mock Test — ${subjectName}*`,
+        `🟢 Mock Test — ${subjectName}`,
         "",
         "Apna exam paper chunein:",
-        "• *Short Test (Unit-wise):* 40 Questions • 40 Marks • -1/3 Negative • *1 Hour*",
-        "• *Full Course Test:* 80 Questions • 80 Marks • -1/3 Negative • *3 Hours*",
+        "• Short Test (Unit-wise): 40 Questions • 40 Marks • -1/3 Negative • 1 Hour",
+        "• Full Course Test: 80 Questions • 80 Marks • -1/3 Negative • 3 Hours",
       ].join("\n"),
       mockModeKeyboard(i)
     );
@@ -1067,12 +1068,12 @@ for (let i = 0; i < SUBJECTS.length; i++) {
   for (const modeKey of ["short", "full"]) {
     bot.action(`mock_mode_${i}_${modeKey}`, async (ctx) => {
       await ctx.answerCbQuery();
-      const s = getSession(ctx.from.id);
+      const s = getSession(ctx.from?.id);
       const cfg = MOCK_CONFIGS[modeKey];
       try {
         await replacePage(
           ctx,
-          `🟢 *${subjectName}* ke liye *${cfg.label}* (${cfg.count} Q • ${cfg.totalMarks}M • -1/3 • ${cfg.timeLabel}) ban raha hai...`
+          `🟢 ${subjectName} ke liye ${cfg.label} (${cfg.count} Q • ${cfg.totalMarks}M • -1/3 • ${cfg.timeLabel}) ban raha hai...`
         );
         const questions = await generateFullExamPaper(subjectName, modeKey, ctx);
         s.mock = {
@@ -1106,7 +1107,7 @@ for (let qIdx = 0; qIdx < 80; qIdx++) {
       await ctx.answerCbQuery(
         opt === "E" ? "Question chhod diya gaya" : `Option ${opt} chuna gaya`
       );
-      const s = getSession(ctx.from.id);
+      const s = getSession(ctx.from?.id);
       if (!s.mock || s.mock.index !== qIdx) return;
 
       s.mock.answers[qIdx] = opt;
@@ -1122,13 +1123,15 @@ for (let qIdx = 0; qIdx < 80; qIdx++) {
 
   bot.action(`mock_submit_${qIdx}`, async (ctx) => {
     await ctx.answerCbQuery("Paper submit kiya ja raha hai...");
-    const s = getSession(ctx.from.id);
+    const s = getSession(ctx.from?.id);
     if (!s.mock) return;
     await finishMockTest(ctx, s);
   });
 }
 bot.command("reset", async (ctx) => {
-  sessions.set(ctx.from.id, createFreshSession());
+  if (ctx.from?.id) {
+    sessions.set(ctx.from.id, createFreshSession());
+  }
   await ctx.reply(
     "STUDY BOT session reset ho gaya. Naye links ya files bhejein.",
     inlineMenuKeyboard()
@@ -1136,7 +1139,7 @@ bot.command("reset", async (ctx) => {
 });
 
 bot.command("status", async (ctx) => {
-  const s = getSession(ctx.from.id);
+  const s = getSession(ctx.from?.id);
   const uData = getUnitData(s.activeSubj ?? 0, s.activeUnit ?? 0);
   await ctx.reply(
     [
@@ -1155,12 +1158,13 @@ bot.command("status", async (ctx) => {
 });
 
 bot.on("photo", async (ctx) => {
-  const s = getSession(ctx.from.id);
-  if (!isAdmin(ctx.from.id)) return;
+  const s = getSession(ctx.from?.id);
+  if (!isAdmin(ctx.from?.id)) return;
 
   try {
-    const photos = ctx.message.photo || [];
+    const photos = ctx.message?.photo || [];
     const largest = photos[photos.length - 1];
+    if (!largest) return;
     const fileLink = await ctx.telegram.getFileLink(largest.file_id);
     const uData = getUnitData(s.activeSubj ?? 0, s.activeUnit ?? 0);
 
@@ -1179,8 +1183,8 @@ bot.on("photo", async (ctx) => {
 });
 
 bot.on("video", async (ctx) => {
-  const s = getSession(ctx.from.id);
-  if (!isAdmin(ctx.from.id)) return;
+  const s = getSession(ctx.from?.id);
+  if (!isAdmin(ctx.from?.id)) return;
 
   const target = s.awaitingLectureVideoFor;
   if (!target) {
@@ -1203,11 +1207,12 @@ bot.on("video", async (ctx) => {
 });
 
 bot.on("document", async (ctx) => {
-  const doc = ctx.message.document;
+  const doc = ctx.message?.document;
+  if (!doc) return;
   const fileName = (doc.file_name || "").toLowerCase();
-  const s = getSession(ctx.from.id);
+  const s = getSession(ctx.from?.id);
 
-  if (s.awaitingLectureVideoFor && isAdmin(ctx.from.id)) {
+  if (s.awaitingLectureVideoFor && isAdmin(ctx.from?.id)) {
     const target = s.awaitingLectureVideoFor;
     const uData = getUnitData(target.subjIdx, target.unitIdx);
     const lec = uData.lectures[target.lecIdx];
@@ -1221,7 +1226,7 @@ bot.on("document", async (ctx) => {
     }
   }
 
-  if (fileName.endsWith(".pdf") && isAdmin(ctx.from.id)) {
+  if (fileName.endsWith(".pdf") && isAdmin(ctx.from?.id)) {
     try {
       const fileLink = await ctx.telegram.getFileLink(doc.file_id);
       const uData = getUnitData(s.activeSubj ?? 0, s.activeUnit ?? 0);
@@ -1270,12 +1275,12 @@ bot.on("document", async (ctx) => {
 });
 
 bot.on("text", async (ctx) => {
-  const text = ctx.message.text.trim();
+  const text = (ctx.message?.text || "").trim();
   if (!text || text.startsWith("/")) return;
 
-  const s = getSession(ctx.from.id);
+  const s = getSession(ctx.from?.id);
 
-  if (s.awaitingYoutubeFor && isAdmin(ctx.from.id)) {
+  if (s.awaitingYoutubeFor && isAdmin(ctx.from?.id)) {
     if (!isHttpUrl(text)) {
       return ctx.reply("Kripya valid YouTube https:// link bhejein.");
     }
@@ -1333,14 +1338,14 @@ bot.on("text", async (ctx) => {
 });
 
 bot.command("source", async (ctx) => {
-  const s = getSession(ctx.from.id);
+  const s = getSession(ctx.from?.id);
   if (!s.apkUrl) {
     return ctx.reply(
       "Pehle .apk file ka direct https:// link bhejein, phir /source likhein."
     );
   }
 
-  const tagName = `source-${ctx.from.id}-${Date.now()}`;
+  const tagName = `source-${ctx.from?.id || "user"}-${Date.now()}`;
   await ctx.reply(
     "STUDY BOT APK source code extraction trigger kiya ja raha hai..."
   );
@@ -1355,7 +1360,7 @@ bot.command("source", async (ctx) => {
       [
         "Source extraction workflow trigger ho gaya!",
         `Tag: ${tagName}`,
-        "GitHub Releases mein `apk-source-code.zip` banne ke baad uska link bhej kar /mergebuild use karein.",
+        "GitHub Releases mein apk-source-code.zip banne ke baad uska link bhej kar /mergebuild use karein.",
       ].join("\n")
     );
   } catch (err) {
@@ -1365,7 +1370,7 @@ bot.command("source", async (ctx) => {
 });
 
 bot.command("mergebuild", async (ctx) => {
-  const s = getSession(ctx.from.id);
+  const s = getSession(ctx.from?.id);
   if (!s.sourceZipUrl) {
     return ctx.reply("Pehle extracted source code ZIP ka https:// link bhejein.");
   }
@@ -1373,7 +1378,7 @@ bot.command("mergebuild", async (ctx) => {
     return ctx.reply("Pehle website panel ki .zip file ya https:// link bhejein.");
   }
 
-  const tagName = `merged-${ctx.from.id}-${Date.now()}`;
+  const tagName = `merged-${ctx.from?.id || "user"}-${Date.now()}`;
   await ctx.reply("Source + STUDY BOT merge aur APK build start ho raha hai...");
 
   try {
@@ -1387,7 +1392,7 @@ bot.command("mergebuild", async (ctx) => {
       [
         "Merge & Build workflow start ho gaya!",
         `Tag: ${tagName}`,
-        "GitHub Releases mein `merged-panel-app.apk` banne ke baad download kar lein.",
+        "GitHub Releases mein merged-panel-app.apk banne ke baad download kar lein.",
       ].join("\n")
     );
   } catch (err) {
@@ -1397,7 +1402,7 @@ bot.command("mergebuild", async (ctx) => {
 });
 
 bot.command("build", async (ctx) => {
-  const s = getSession(ctx.from.id);
+  const s = getSession(ctx.from?.id);
 
   if (!s.apkUrl) {
     return ctx.reply("Pehle base .apk ka direct https:// link bhejein.");
@@ -1406,7 +1411,7 @@ bot.command("build", async (ctx) => {
     return ctx.reply("Pehle Website URL ya Website ZIP link/file bhejein.");
   }
 
-  const tagName = `build-${ctx.from.id}-${Date.now()}`;
+  const tagName = `build-${ctx.from?.id || "user"}-${Date.now()}`;
   await ctx.reply("GitHub Actions workflow trigger ho raha hai...");
 
   try {
