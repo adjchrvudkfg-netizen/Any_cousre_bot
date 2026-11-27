@@ -4,7 +4,7 @@ const { PDFDocument } = require("pdf-lib");
 
 const BOT_TOKEN = (process.env.BOT_TOKEN || "").trim();
 const GEMINI_API_KEY = (process.env.GEMINI_API_KEY || "").trim();
-const GEMINI_MODEL = (process.env.GEMINI_MODEL || "gemini-2.5-flash").trim();
+const GEMINI_MODEL = (process.env.GEMINI_MODEL || "gemini-3.8-flash").trim();
 const ADMIN_IDS = (process.env.ADMIN_IDS || "")
   .split(",")
   .map((id) => Number(id.trim()))
@@ -283,11 +283,10 @@ function inlineMenuKeyboard() {
 
 function subjectButtonsKeyboard(prefix, isNotes = false) {
   const icon = isNotes ? "🔵" : "🟢";
-  const backIcon = isNotes ? "🔵" : "🟢";
   const rows = SUBJECTS.map((subj, idx) => [
     Markup.button.callback(`${icon} ${idx + 1}. ${subj}`, `${prefix}_${idx}`),
   ]);
-  rows.push([Markup.button.callback(`${backIcon} Back to Menu`, "back_main")]);
+  rows.push([Markup.button.callback("🟢 Back to Menu", "back_main")]);
   return Markup.inlineKeyboard(rows);
 }
 
@@ -550,7 +549,6 @@ async function handleAdminTextCommand(ctx, text) {
     return true;
   }
 
-  // --- NOTES ADD / UPDATE / DELETE ---
   if (text.startsWith("/addnotes")) {
     if (!isAdmin(ctx.from?.id)) {
       await ctx.reply("Sirf admin hi notes add kar sakta hai.");
@@ -607,7 +605,7 @@ async function handleAdminTextCommand(ctx, text) {
       const uData = getUnitData(sIdx, uIdx);
       uData.notesText = newText;
       await ctx.reply(
-        `🔵 Notes text replace/update ho gaya!\nSubject: ${SUBJECTS[sIdx]} • ${DEFAULT_UNITS[uIdx]}`
+        `🔵 Notes text update ho gaya!\nSubject: ${SUBJECTS[sIdx]} • ${DEFAULT_UNITS[uIdx]}`
       );
     } catch (err) {
       await ctx.reply(`Update notes error: ${err.message}`);
@@ -650,7 +648,6 @@ async function handleAdminTextCommand(ctx, text) {
     return true;
   }
 
-  // --- SYLLABUS ADD / UPDATE / DELETE ---
   if (text.startsWith("/addsyllabus")) {
     if (!isAdmin(ctx.from?.id)) {
       await ctx.reply("Sirf admin hi syllabus add kar sakta hai.");
@@ -750,7 +747,6 @@ async function handleAdminTextCommand(ctx, text) {
     return true;
   }
 
-  // --- LECTURE ADD / UPDATE / DELETE ---
   if (text.startsWith("/addlecture")) {
     if (!isAdmin(ctx.from?.id)) {
       await ctx.reply("Sirf admin hi lecture add kar sakta hai.");
