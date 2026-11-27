@@ -103,6 +103,16 @@ async function mergeFilesToSinglePdf(items) {
 
   return Buffer.from(await mergedPdf.save());
 }
+async function fetchWithTimeout(url, options = {}, timeoutMs = 12000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function askGemini(prompt) {
   if (!GEMINI_API_KEY) {
     throw new Error("GEMINI_API_KEY environment variable missing hai.");
@@ -115,16 +125,31 @@ async function askGemini(prompt) {
     modelName
   )}:generateContent?key=${encodeURIComponent(GEMINI_API_KEY)}`;
 
-  const maxAttempts = 5;
+  const maxAttempts = 4;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-      }),
-    });
+    let res;
+    try {
+      res = await fetchWithTimeout(
+        url,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+          }),
+        },
+        12000
+      );
+    } catch (err) {
+      if (attempt === maxAttempts) {
+        throw new Error(
+          `Gemini request timeout/network error: ${err?.message || err}`
+        );
+      }
+      await new Promise((r) => setTimeout(r, attempt * 1500));
+      continue;
+    }
 
     if (res.ok) {
       const data = await res.json();
@@ -148,8 +173,7 @@ async function askGemini(prompt) {
       throw new Error(`Gemini API error (${res.status}): ${errText}`);
     }
 
-    const waitMs = attempt * 2500;
-    await new Promise((resolve) => setTimeout(resolve, waitMs));
+    await new Promise((r) => setTimeout(r, attempt * 1500));
   }
 }
 
@@ -1010,37 +1034,81 @@ async function generateExamPaperBatch(subjectName, modeKey, startNum, batchSize)
   }));
 }
 
-async function generateFullExamPaper(subjectName, modeKey, ctx) {
+async function startMockWithFastFirstBatch(ctx, s, subjectName, modeKey) {
   const cfg = MOCK_CONFIGS[modeKey] || MOCK_CONFIGS.short;
-  const batchSize = 20;
-  const allQuestions = [];
+  const batchSize = 10;
 
-  for (let offset = 0; offset < cfg.count; offset += batchSize) {
-    const currentBatch = Math.min(batchSize, cfg.count - offset);
-    if (ctx && cfg.count > 20) {
-      await replacePage(
-        ctx,
-        `🟢 ${subjectName} — ${cfg.label}\nPractice questions ban rahe hain: ${Math.min(
-          offset + currentBatch,
-          cfg.count
-        )} / ${cfg.count}...`
-      );
-    }
-    const batch = await generateExamPaperBatch(
-      subjectName,
-      modeKey,
-      offset + 1,
-      currentBatch
-    );
-    allQuestions.push(...batch);
+  await replacePage(
+    ctx,
+    `🟢 ${subjectName} — ${cfg.label}\nPehle ${batchSize} questions taiyar ho rahe hain...`
+  );
+
+  const initialQuestions = await generateExamPaperBatch(
+    subjectName,
+    modeKey,
+    1,
+    batchSize
+  );
+
+  s.mock = {
+    subject: subjectName,
+    label: cfg.label,
+    totalMarks: cfg.totalMarks,
+    marksPerQ: cfg.marksPerQ,
+    negativePerWrong: cfg.negativePerWrong,
+    durationMins: cfg.durationMins,
+    timeLabel: cfg.timeLabel,
+    targetCount: cfg.count,
+    loadingMore: cfg.count > initialQuestions.length,
+    startedAt: Date.now(),
+    questions: initialQuestions,
+    index: 0,
+    answers: [],
+  };
+
+  await sendMockQuestion(ctx, s);
+
+  if (cfg.count > initialQuestions.length) {
+    (async () => {
+      try {
+        for (
+          let offset = initialQuestions.length;
+          offset < cfg.count;
+          offset += batchSize
+        ) {
+          if (!s.mock || s.mock.subject !== subjectName) break;
+          const batchLen = Math.min(batchSize, cfg.count - offset);
+          const nextBatch = await generateExamPaperBatch(
+            subjectName,
+            modeKey,
+            offset + 1,
+            batchLen
+          );
+          if (s.mock && s.mock.subject === subjectName) {
+            s.mock.questions.push(...nextBatch);
+          }
+        }
+      } catch (_) {
+      } finally {
+        if (s.mock && s.mock.subject === subjectName) {
+          s.mock.loadingMore = false;
+        }
+      }
+    })();
   }
-
-  return allQuestions.slice(0, cfg.count);
 }
 
 async function sendMockQuestion(ctx, s) {
   const m = s.mock;
-  if (!m || m.index >= m.questions.length) {
+  if (!m) return;
+
+  if (m.index >= m.questions.length) {
+    if (m.loadingMore) {
+      await ctx.reply(
+        `🟢 Agle questions load ho rahe hain (${m.questions.length} / ${m.targetCount})... thodi der mein dobara answer button tap karein ya Submit Test dabayein.`
+      );
+      return;
+    }
     return finishMockTest(ctx, s);
   }
 
@@ -1056,12 +1124,15 @@ async function sendMockQuestion(ctx, s) {
   const qObj = m.questions[m.index];
   const qNum = m.index + 1;
   const remainingMins = Math.max(0, m.durationMins - elapsedMins);
+  const totalDisplay = m.loadingMore
+    ? `${m.questions.length}+ (Target ${m.targetCount})`
+    : `${m.questions.length}`;
 
   const text = [
     `🟢 ${m.subject}`,
     `📝 ${m.label} | MM: ${m.totalMarks} | Neg: -1/3 | Left: ~${remainingMins}m`,
     `━━━━━━━━━━━━━━━━━━━━`,
-    `Q${qNum} / ${m.questions.length} [${qObj.unit} • +${m.marksPerQ} / -1/3]:`,
+    `Q${qNum} / ${totalDisplay} [${qObj.unit} • +${m.marksPerQ} / -1/3]:`,
     `${qObj.q}`,
     "",
     `A) ${qObj.A}`,
@@ -1123,7 +1194,7 @@ async function finishMockTest(ctx, s) {
     `✅ Sahi (Correct): ${correctCount}`,
     `❌ Galat (Wrong): ${wrongCount}`,
     `⏭️ Chhode (Skipped): ${skippedCount}`,
-    `📊 Total Questions: ${m.questions.length}`,
+    `📊 Attempted / Loaded Questions: ${m.questions.length}`,
     "━━━━━━━━━━━━━━━━━━━━",
     "",
     "Question-wise Answer Key & Review:",
@@ -1446,25 +1517,7 @@ async function handleCallbackData(ctx, data) {
     if (!subjectName || !cfg) return true;
 
     try {
-      await replacePage(
-        ctx,
-        `🟢 ${subjectName} ke liye ${cfg.label} (${cfg.count} Q • ${cfg.totalMarks}M • -1/3 • ${cfg.timeLabel}) ban raha hai...`
-      );
-      const questions = await generateFullExamPaper(subjectName, modeKey, ctx);
-      s.mock = {
-        subject: subjectName,
-        label: cfg.label,
-        totalMarks: cfg.totalMarks,
-        marksPerQ: cfg.marksPerQ,
-        negativePerWrong: cfg.negativePerWrong,
-        durationMins: cfg.durationMins,
-        timeLabel: cfg.timeLabel,
-        startedAt: Date.now(),
-        questions,
-        index: 0,
-        answers: [],
-      };
-      await sendMockQuestion(ctx, s);
+      await startMockWithFastFirstBatch(ctx, s, subjectName, modeKey);
     } catch (err) {
       await replacePage(
         ctx,
@@ -1484,7 +1537,7 @@ async function handleCallbackData(ctx, data) {
     s.mock.answers[qIdx] = opt;
     s.mock.index += 1;
 
-    if (s.mock.index < s.mock.questions.length) {
+    if (s.mock.index < s.mock.questions.length || s.mock.loadingMore) {
       await sendMockQuestion(ctx, s);
     } else {
       await finishMockTest(ctx, s);
